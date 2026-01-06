@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "/Users/daviskim/Documents/GitHub/options/options-shared/"
+    ]
+}

@@ -1,0 +1,33 @@
+# FastAPI and ASGI server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.3
+
+# Database
+sqlalchemy>=2.0.25
+psycopg[binary]>=3.2.10  # Use latest compatible version for Python 3.14
+alembic>=1.13.1
+
+# Background task scheduling
+apscheduler>=3.10.4
+
+# HTTP requests for news APIs
+requests>=2.31.0
+
+# RSS feed parsing (for Google News)
+feedparser>=6.0.11
+
+# Transformer-based sentiment analysis (FinBERT)
+# Note: For Python 3.14, we need to install these carefully
+transformers>=4.36.0
+torch>=2.1.0
+# sentencepiece and tokenizers will be installed as dependencies
+accelerate>=0.25.0  # Improved model loading
+
+# Utility libraries (likely already in your project)
+python-dotenv>=1.0.0
+
+redis>=4.7.6
+
+#Shared
+-e ../options-shared/

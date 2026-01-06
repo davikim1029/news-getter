@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Main (Dynamic Args)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": [],           // leave empty to prompt dynamically
+      "console": "integratedTerminal"
+    }
+  ]
+}
