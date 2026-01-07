@@ -374,10 +374,6 @@ async def start_scheduler():
         replace_existing=True,
         kwargs={"db": SessionLocal()}
     )
-    
-    app_state.scheduler.start()
-    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
-    
     app_state.scheduler.add_job(
         save_tickers_to_db,
         trigger=IntervalTrigger(weeks=2),
@@ -386,9 +382,15 @@ async def start_scheduler():
         replace_existing=True,
         kwargs={"db": SessionLocal()}
     )
+        
+    app_state.scheduler.start()
+    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
+    
 
 async def save_tickers_to_db(db: Session = None):
     """Fetch and save US tickers to the database"""
+    
+    logger.logMessage("[Tickers] Fetching and saving US tickers to database...")
     from shared_options.models.tickers import fetch_us_tickers_from_finnhub
     if db is None:
         db = SessionLocal()
