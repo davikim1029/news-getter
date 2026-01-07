@@ -487,6 +487,40 @@ async def root():
         "scheduler_running": app_state.scheduler.running if app_state.scheduler else False,
         "is_processing": app_state.is_processing
     }
+    
+@app.post("/sentiment/{symbol}/score")
+async def get_sentiment_score(
+    symbol: str,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Lightweight endpoint - returns just the sentiment score.
+    
+    - Checks database cache first (if not force_refresh)
+    - Aggregates new data if needed
+    - Returns minimal response with just the score
+    """
+    symbol = symbol.upper()
+    
+    # Get or create sentiment data
+    sentiment = await aggregate_and_store_ticker(
+        symbol, None, db, force_refresh
+    )
+    
+    if sentiment is None:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limited. Please try again later."
+        )
+    
+    return {
+        "symbol": symbol,
+        "sentiment_score": sentiment.sentiment_score,
+        "article_count": sentiment.article_count,
+        "last_updated": sentiment.last_updated.isoformat(),
+        "from_cache": not force_refresh
+    }
 
 
 @app.post("/sentiment/{symbol}", response_model=SentimentResponse)
