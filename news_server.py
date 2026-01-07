@@ -436,6 +436,9 @@ async def stop_scheduler():
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     # Startup
+    from dotenv import load_dotenv
+    load_dotenv()  # reads .env into os.environ
+    
     logger.logMessage("[App] Starting up...")
     
     # Initialize database (create tables if needed)
