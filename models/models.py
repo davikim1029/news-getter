@@ -6,6 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from database.database import Base
 
+# ===========================
+# Global State
+# ===========================
+class AppState:
+    def __init__(self):
+        self.scheduler: Optional[AsyncIOScheduler] = None
+        self.rate_cache = RateLimitCache()
+        self.headline_cache = HeadlineCache()
+        self.is_processing = False
+
 
 # ===========================
 # Pydantic Models
