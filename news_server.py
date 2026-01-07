@@ -366,6 +366,9 @@ async def start_scheduler():
     # Default: run every 60 minutes
     interval_minutes = int(os.getenv("AGGREGATION_INTERVAL_MINUTES", "60"))
     
+    #Run once at startup
+    await save_tickers_to_db(db=SessionLocal())
+    
     app_state.scheduler.add_job(
         process_all_tickers,
         trigger=IntervalTrigger(minutes=interval_minutes),
