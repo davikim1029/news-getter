@@ -24,7 +24,7 @@ logger = getLogger()
 # -----------------------------
 PORT = 9000
 PID_FILE = Path("news_server.pid")
-APP_NAME = "main:app" 
+APP_NAME = "news_server:app" 
 APP_NAME_FRAGMENT = "news_server"
 LOG_FILE = Path("news_server.log")
 

@@ -29,5 +29,7 @@ python-dotenv>=1.0.0
 
 redis>=4.7.6
 
+yfinance
+
 #Shared
 -e ../options-shared/

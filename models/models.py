@@ -5,6 +5,8 @@ from datetime import datetime
 from dataclasses import dataclass
 from datetime import datetime
 from database.database import Base
+from services.core.cache_manager import RateLimitCache, HeadlineCache
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ===========================
 # Global State
