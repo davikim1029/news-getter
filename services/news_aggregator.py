@@ -267,7 +267,7 @@ SOURCE_WEIGHTS = {
 }
 
 # Optional transformer support — disable by default to avoid heavy deps
-USE_TRANSFORMERS = os.getenv("USE_TRANSFORMERS", "false").lower() == "true"
+USE_TRANSFORMERS = True
 _transformer_pipeline = None
 
 
@@ -305,7 +305,7 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
         texts = [h.combined_text()[:400] for h in headlines]
 
         # Transformer path (yields roughly -1..1 via mapping)
-# In news_aggregator.py, modify the transformer section:
+        # In news_aggregator.py, modify the transformer section:
 
         if USE_TRANSFORMERS:
             pipeline = _load_transformer_pipeline()

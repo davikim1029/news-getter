@@ -110,6 +110,16 @@ def init_database():
             
             logger.logMessage("[DB] ✓ Additional indexes verified")
             
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tickers (
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    PRIMARY KEY (symbol)
+                )
+            """)
+            logger.logMessage("[DB] tickers table verified")
+            
             conn.commit()
             
         except Exception as e:

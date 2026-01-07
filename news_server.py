@@ -197,6 +197,9 @@ async def process_all_tickers(db: Session):
     if app_state.is_processing:
         logger.logMessage("[Scheduler] Already processing, skipping...")
         return
+
+    symbol_map = load_symbol_map(db)
+
     
     try:
         app_state.is_processing = True
@@ -215,9 +218,10 @@ async def process_all_tickers(db: Session):
         
         for symbol in unique_symbols:
             try:
+                ticker_name = symbol_map.get(symbol) 
                 result = await aggregate_and_store_ticker(
                     symbol,
-                    None,  # We don't have company names in option_lifetimes
+                    ticker_name,
                     db,
                     force_refresh=False
                 )
@@ -242,6 +246,14 @@ async def process_all_tickers(db: Session):
         logger.logMessage(f"[Scheduler] Batch processing error: {e}")
     finally:
         app_state.is_processing = False
+
+from sqlalchemy import text
+
+def load_symbol_map(db: Session) -> Dict[str, str]:
+    result = db.execute(
+        text("SELECT symbol, name FROM tickers")
+    )
+    return {row.symbol: row.name for row in result}
 
 
 def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict[str, Any]:
@@ -365,6 +377,42 @@ async def start_scheduler():
     
     app_state.scheduler.start()
     logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
+    
+    app_state.scheduler.add_job(
+        save_tickers_to_db,
+        trigger=IntervalTrigger(weeks=2),
+        id="ticker_saver",
+        name="Fetch and save US tickers to database",
+        replace_existing=True
+    )
+
+async def save_tickers_to_db():
+    """Fetch and save US tickers to the database"""
+    from shared_options.models.tickers import fetch_us_tickers_from_finnhub
+    db = SessionLocal()
+    try:
+        ticker_dict = fetch_us_tickers_from_finnhub(None)
+        for symbol, name in ticker_dict.items():
+            existing = db.execute(
+                "SELECT 1 FROM tickers WHERE symbol = :symbol",
+                {"symbol": symbol}
+            ).fetchone()
+            if not existing:
+                db.execute(
+                    "INSERT INTO tickers (symbol, name, timestamp) VALUES (:symbol, :name, :timestamp)",
+                    {
+                        "symbol": symbol,
+                        "name": name,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+        db.commit()
+        logger.logMessage(f"[Tickers] Saved {len(ticker_dict)} US tickers to database")
+    except Exception as e:
+        logger.logMessage(f"[Tickers] Error saving tickers: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 async def stop_scheduler():
