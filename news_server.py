@@ -12,7 +12,6 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 import asyncio
-import redis.asyncio as redis
 import os
 import json
 from contextlib import asynccontextmanager
@@ -383,14 +382,6 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     # Startup
     logger.logMessage("[App] Starting up...")
-    app.state.redis = redis.from_url(
-    os.getenv("REDIS_URL", "redis://localhost:6379"),
-    decode_responses=True,  # strings instead of bytes
-    )
-
-    # Optional: verify connection
-    await app.state.redis.ping()
-    logger.logMessage("[App] Redis connected")
     
     # Initialize database (create tables if needed)
     init_database()
@@ -399,7 +390,7 @@ async def lifespan(app: FastAPI):
     if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
-        await redis.to_thread(_load_transformer_pipeline)
+        await asyncio.to_thread(_load_transformer_pipeline)
     
     await start_scheduler()
     
@@ -409,9 +400,6 @@ async def lifespan(app: FastAPI):
     logger.logMessage("[App] Shutting down...")
     await stop_scheduler()
         
-    await app.state.redis.close()
-    logger.logMessage("[App] Redis connection closed")
-
 
 
 # ===========================
