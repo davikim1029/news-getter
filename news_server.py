@@ -11,6 +11,7 @@ Features:
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
+import asyncio
 import redis.asyncio as redis
 import os
 import json
@@ -228,7 +229,7 @@ async def process_all_tickers(db: Session):
                     errors += 1
                 
                 # Small delay to avoid hammering APIs
-                await redis.asyncio.sleep(2)
+                await asyncio.sleep(2)
                 
             except Exception as e:
                 logger.logMessage(f"[Scheduler] Error processing {symbol}: {e}")
@@ -382,7 +383,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     # Startup
     logger.logMessage("[App] Starting up...")
-    app.state.redis = redis.asyncio.from_url(
+    app.state.redis = redis.from_url(
     os.getenv("REDIS_URL", "redis://localhost:6379"),
     decode_responses=True,  # strings instead of bytes
     )
@@ -398,7 +399,7 @@ async def lifespan(app: FastAPI):
     if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
-        await redis.asyncio.to_thread(_load_transformer_pipeline)
+        await redis.to_thread(_load_transformer_pipeline)
     
     await start_scheduler()
     
