@@ -400,18 +400,21 @@ async def save_tickers_to_db(db: Session = None):
     try:
         ticker_dict = fetch_us_tickers_from_finnhub(None)
         for symbol, name in ticker_dict.items():
-            existing = db.execute(text(
-                "SELECT 1 FROM tickers WHERE symbol = :symbol",
-                {"symbol": symbol})
+            existing = db.execute(
+                text("SELECT 1 FROM tickers WHERE symbol = :symbol"),
+                {"symbol": symbol},
             ).fetchone()
             if not existing:
-                db.execute(text(
-                    "INSERT INTO tickers (symbol, name, timestamp) VALUES (:symbol, :name, :timestamp)",
+                db.execute(
+                    text(
+                        "INSERT INTO tickers (symbol, name, timestamp) "
+                        "VALUES (:symbol, :name, :timestamp)"
+                    ),
                     {
                         "symbol": symbol,
                         "name": name,
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                        "timestamp": datetime.utcnow(),
+                    },
                 )
         db.commit()
         logger.logMessage(f"[Tickers] Saved {len(ticker_dict)} US tickers to database")
