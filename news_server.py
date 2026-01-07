@@ -383,13 +383,15 @@ async def start_scheduler():
         trigger=IntervalTrigger(weeks=2),
         id="ticker_saver",
         name="Fetch and save US tickers to database",
-        replace_existing=True
+        replace_existing=True,
+        kwargs={"db": SessionLocal()}
     )
 
-async def save_tickers_to_db():
+async def save_tickers_to_db(db: Session = None):
     """Fetch and save US tickers to the database"""
     from shared_options.models.tickers import fetch_us_tickers_from_finnhub
-    db = SessionLocal()
+    if db is None:
+        db = SessionLocal()
     try:
         ticker_dict = fetch_us_tickers_from_finnhub(None)
         for symbol, name in ticker_dict.items():
