@@ -471,9 +471,13 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
     # Get recent articles for this symbol
-    articles = db.query(NewsArticle).filter(
-        NewsArticle.symbol == symbol
-    ).order_by(NewsArticle.fetched_at.desc()).limit(50).all()
+    try:
+        articles = db.query(NewsArticle).filter(
+            NewsArticle.symbol == symbol
+        ).order_by(NewsArticle.fetched_at.desc()).limit(50).all()
+    except Exception as e:
+        logger.logMessage(f"[API] Error fetching articles for {symbol}: {e}")
+        articles = []
 
     articles_data = [
         {
