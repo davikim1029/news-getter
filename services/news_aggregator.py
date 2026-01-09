@@ -312,24 +312,74 @@ USE_TRANSFORMERS = True
 _transformer_pipeline = None
 
 
+from threading import Lock
+
+_transformer_pipeline = None
+_transformer_failed = False
+_transformer_lock = Lock()
+
+
 def _load_transformer_pipeline():
-    global _transformer_pipeline
+    """
+    Thread-safe, deterministic transformer loader.
+    Loads FinBERT exactly once.
+    Falls back cleanly on failure.
+    """
+    global _transformer_pipeline, _transformer_failed
+
+    # Fast exit paths
     if _transformer_pipeline is not None:
         return _transformer_pipeline
-    try:
-        import transformers
-        model_name = "ProsusAI/finbert"
-        tok = transformers.AutoTokenizer.from_pretrained(model_name)
-        # If the tokenizer has no pad_token, set it to eos_token
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
-        model = transformers.AutoModelForSequenceClassification.from_pretrained(model_name)
-        _transformer_pipeline = transformers.pipeline("sentiment-analysis", model=model, tokenizer=tok)
-        logger.logMessage("[Sentiment] Transformer pipeline loaded")
-    except Exception as e:
-        logger.logMessage(f"[Sentiment] Transformer load failed: {e}")
-        _transformer_pipeline = None
-    return _transformer_pipeline
+    if _transformer_failed:
+        return None
+
+    with _transformer_lock:
+        # Re-check inside lock
+        if _transformer_pipeline is not None:
+            return _transformer_pipeline
+        if _transformer_failed:
+            return None
+
+        try:
+            from transformers import (
+                AutoTokenizer,
+                AutoModelForSequenceClassification,
+                pipeline,
+            )
+            import torch
+
+            model_name = "ProsusAI/finbert"
+
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            model = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=False,
+                device_map=None,           
+            )
+
+            model.eval()
+
+            _transformer_pipeline = pipeline(
+                "sentiment-analysis",
+                model=model,
+                tokenizer=tokenizer,
+                device=-1,  # force CPU
+            )
+
+            logger.logMessage("[Sentiment] Transformer pipeline loaded")
+
+        except Exception as e:
+            _transformer_failed = True
+            _transformer_pipeline = None
+            logger.logMessage(f"[Sentiment] Transformer permanently disabled: {e}")
+
+        return _transformer_pipeline
+
 
 
 def compute_headlines_sentiment(headlines: List[Headline]) -> float:

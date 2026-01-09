@@ -567,7 +567,7 @@ async def lifespan(app: FastAPI):
     init_database()
     
     # Warm up transformer model if enabled
-    if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
+    if True or os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
         await asyncio.to_thread(_load_transformer_pipeline)
