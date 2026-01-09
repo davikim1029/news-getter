@@ -222,6 +222,7 @@ class GoogleNewsClient(NewsClientBase):
                     url=getattr(entry, "link", None),
                     published_at=getattr(entry, "published", None) or getattr(entry, "updated", None)
                 ))
+            self.logger.logMessage(f"[GoogleNews] fetched {len(out)} headlines for query '{query}'") 
             return out
         except Exception as e:
             self.logger.logMessage(f"[GoogleNews] fetch error: {e}")
@@ -270,6 +271,7 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
                 f"[Aggregator] Partial failures for {ticker}: "
                 f"exceptions={[(n,type(e).__name__) for n,e in exceptions]}, "
                 f"rate_limited={rate_limited_sources}"
+                f"returning {len(aggregated)} headlines"
             )
         return aggregated
 
