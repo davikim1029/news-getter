@@ -493,16 +493,17 @@ async def start_scheduler():
     # Default: run every 60 minutes
     interval_minutes = int(os.getenv("AGGREGATION_INTERVAL_MINUTES", "60"))
     
-    #Run once at startup
-    await save_tickers_to_db(db=SessionLocal())
+    # Start scheduler immediately
+    app_state.scheduler.start()
     
+    # Schedule jobs
     app_state.scheduler.add_job(
         job_wrapper,
         trigger=IntervalTrigger(minutes=interval_minutes),
         id="news_aggregation",
         name="Aggregate news for all tickers",
         replace_existing=True,
-        kwargs={"job_func": process_all_tickers}  # job_wrapper now calls this
+        kwargs={"job_func": process_all_tickers}
     )
     
     app_state.scheduler.add_job(
@@ -513,10 +514,12 @@ async def start_scheduler():
         replace_existing=True,
         kwargs={"job_func": save_tickers_to_db}
     )
-        
-    app_state.scheduler.start()
-    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
     
+    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
+
+    # Run ticker fetch in the background so startup is non-blocking
+    asyncio.create_task(save_tickers_to_db(db=SessionLocal()))
+  
 
 async def save_tickers_to_db(db: Session = None):
     """Fetch and save US tickers to the database"""
