@@ -342,7 +342,7 @@ def get_mode_from_prompt():
 
 import requests, time
 
-def wait_for_server(port=PORT, timeout=10):
+def wait_for_server(port=PORT, timeout=600):
     start = time.time()
     while time.time() - start < timeout:
         try:

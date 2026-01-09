@@ -88,6 +88,9 @@ async def aggregate_and_store_ticker(
                     logger.logMessage(
                         f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)"
                     )
+                    logger.logMessage(f"[API] Cache payload type: {type(existing)}")
+                    logger.logMessage(f"[API] Cache payload repr: {repr(existing)[:500]}")
+
                     return existing
 
         logger.logMessage(f"[API] Aggregating news for {ticker}")
