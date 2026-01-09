@@ -95,7 +95,19 @@ class SymbolSentiment(Base):
     sentiment_score = Column(Float)
     article_count = Column(Integer)
     last_updated = Column(DateTime, default=datetime.utcnow, index=True)
-    source_breakdown = Column(Text)  # JSON string: {"newsapi": 5, "google": 10}
+    source_breakdown = Column(Text) 
+
+
+class SymbolSentimentOut(BaseModel):
+    symbol: str
+    symbol_name: Optional[str]
+    sentiment_score: float
+    article_count: int
+    source_breakdown: dict
+    last_updated: datetime
+
+    # Allow constructing from ORM objects
+    model_config = {"from_attributes": True}
 
 
 class OptionLifetime(Base):
@@ -105,3 +117,19 @@ class OptionLifetime(Base):
     osiKey = Column("osiKey", Text, primary_key=True)
     timestamp = Column(Text, nullable=False)
     symbol = Column(Text, nullable=False, index=True)
+
+
+
+from fastapi import HTTPException
+import json
+
+# Convert ORM → Pydantic before returning
+def orm_to_out(record: SymbolSentiment) -> SymbolSentimentOut:
+    return SymbolSentimentOut(
+        symbol=record.symbol,
+        symbol_name=record.symbol_name,
+        sentiment_score=record.sentiment_score or 0.0,
+        article_count=record.article_count or 0,
+        source_breakdown=json.loads(record.source_breakdown or "{}"),
+        last_updated=record.last_updated,
+    )

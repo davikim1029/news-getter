@@ -17,13 +17,15 @@ import json
 from contextlib import asynccontextmanager
 from models.models import (
     SymbolSentiment,
+    SymbolSentimentOut,
     NewsArticle,
     OptionLifetime,
     SentimentResponse,
     MigrationRequest,
     SchedulerConfig,
     AppState,
-    TickerSentiment
+    TickerSentiment,
+    orm_to_out
 )
 from database.database import (engine, SessionLocal, init_database, get_db)
 from sqlalchemy.orm import sessionmaker, Session
@@ -56,7 +58,7 @@ async def aggregate_and_store_ticker(
     ticker_name: str | None,
     db: Session,
     force_refresh: bool = False,
-) -> SymbolSentiment:
+) -> SymbolSentimentOut:
     """
     Production-ready async aggregation pipeline.
 
@@ -88,10 +90,8 @@ async def aggregate_and_store_ticker(
                     logger.logMessage(
                         f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)"
                     )
-                    logger.logMessage(f"[API] Cache payload type: {type(existing)}")
-                    logger.logMessage(f"[API] Cache payload repr: {repr(existing)[:500]}")
-
-                    return existing
+                    return orm_to_out(existing)
+     
 
         logger.logMessage(f"[API] Aggregating news for {ticker}")
 
@@ -221,8 +221,8 @@ async def aggregate_and_store_ticker(
             f"[API] {ticker}: sentiment={sentiment_score:.3f}, "
             f"articles={len(headlines)}, stored={stored_articles if headlines else 0}"
         )
-
-        return sentiment_record
+        out = orm_to_out(sentiment_record)
+        return out
 
     except RateLimitedException:
         logger.logMessage(f"[API] Rate-limited for {ticker}")
@@ -616,7 +616,7 @@ from models.models import SentimentResponse
 async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Session = Depends(get_db)):
     symbol = symbol.upper()
     try:
-        sentiment: SymbolSentiment = await aggregate_and_store_ticker(symbol, None, db, force_refresh)
+        sentiment: SymbolSentimentOut = await aggregate_and_store_ticker(symbol, None, db, force_refresh)
     except RateLimitedException as e:
         raise HTTPException(status_code=429, detail=str(e))
     except AggregatorException as e:
@@ -644,7 +644,7 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
         }
         for a in articles
     ]
-    
+    logger.logMessage(f"[API] Fetched {len(articles_data)} articles for {symbol}")
     response = SentimentResponse(
         symbol=sentiment.symbol,
         symbol_name=sentiment.symbol_name,
