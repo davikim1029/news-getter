@@ -486,8 +486,8 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
         }
         for a in articles
     ]
-
-    return SentimentResponse(
+    
+    response = SentimentResponse(
         symbol=sentiment.symbol,
         symbol_name=sentiment.symbol_name,
         sentiment_score=sentiment.sentiment_score,
@@ -497,6 +497,8 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
         last_updated=sentiment.last_updated.isoformat() if sentiment.last_updated else None,
         from_cache=not force_refresh
     )
+    logger.logMessage(f"[API] Sentiment response for {symbol}: {response}")
+    return response
 
 @app.post("/migrate")
 async def migrate_json_data(

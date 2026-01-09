@@ -222,7 +222,6 @@ class GoogleNewsClient(NewsClientBase):
                     url=getattr(entry, "link", None),
                     published_at=getattr(entry, "published", None) or getattr(entry, "updated", None)
                 ))
-            self.logger.logMessage(f"[GoogleNews] fetched {len(out)} headlines for query '{query}'") 
             return out
         except Exception as e:
             self.logger.logMessage(f"[GoogleNews] fetch error: {e}")
