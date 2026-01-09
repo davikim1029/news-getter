@@ -43,158 +43,43 @@ logger = getLogger()
 
 app_state = AppState()
 
+
 # ===========================
 # Core Business Logic
 # ===========================
+from services.news_aggregator import (
+    RateLimitedException,
+    AggregatorException)
+
 async def aggregate_and_store_ticker(
     ticker: str,
     ticker_name: str | None,
     db: Session,
     force_refresh: bool = False
 ) -> SymbolSentiment | None:
-    """
-    Fully async-friendly version of aggregate_and_store_ticker.
-    - Uses asyncio.to_thread for all blocking DB/network work.
-    - Keeps the event loop responsive.
-    """
     try:
-        ticker = ticker.upper()
-
-        # ============================
-        # 1. Check cache
-        # ============================
-        if not force_refresh:
-            existing = await asyncio.to_thread(
-                lambda: db.query(SymbolSentiment)
-                          .filter(SymbolSentiment.symbol == ticker)
-                          .first()
-            )
-            if existing:
-                age = datetime.utcnow() - existing.last_updated
-                if age.total_seconds() < 3600:
-                    logger.logMessage(f"[API] Using cached data for {ticker} (age: {age})")
-                    return existing
-
-        logger.logMessage(f"[API] Aggregating news for {ticker}")
-
-        # ============================
-        # 2. Fetch headlines (blocking -> thread)
-        # ============================
         headlines = await asyncio.to_thread(
             aggregate_headlines_smart,
             ticker,
             ticker_name or "",
             app_state.rate_cache
         )
-
-        if not headlines:
-            logger.logMessage(f"[API] Rate limited for {ticker}")
-            return None
-
-        # ============================
-        # 3. Store articles in DB
-        # ============================
-        def store_articles_thread():
-            stored_count = 0
-            from datetime import timedelta
-            cutoff_date = datetime.utcnow() - timedelta(days=30)
-
-            # Delete stale articles
-            deleted = db.query(NewsArticle).filter(
-                NewsArticle.symbol == ticker,
-                NewsArticle.fetched_at < cutoff_date
-            ).delete()
-            if deleted > 0:
-                logger.logMessage(f"[DB] Removed {deleted} stale articles for {ticker}")
-
-            # Add new articles
-            for h in headlines:
-                if h.url:
-                    existing_article = db.query(NewsArticle).filter(
-                        NewsArticle.url == h.url
-                    ).first()
-                    if existing_article:
-                        existing_article.fetched_at = datetime.utcnow()
-                        continue
-
-                article = NewsArticle(
-                    symbol=ticker,
-                    source=h.source or "unknown",
-                    title=h.title or "",
-                    description=h.description,
-                    url=h.url,
-                    published_at=h.published_at,
-                    fetched_at=datetime.utcnow()
-                )
-                db.add(article)
-                stored_count += 1
-
-            db.commit()
-            return stored_count
-
-
-        stored_articles = await asyncio.to_thread(store_articles_thread)
-
-        # ============================
-        # 4. Compute sentiment (blocking -> thread)
-        # ============================
-        sentiment_score = 0.0
-        if headlines:
-            from services.news_aggregator import compute_headlines_sentiment
-            sentiment_score = await asyncio.to_thread(
-                compute_headlines_sentiment, headlines
-            )
-
-        # ============================
-        # 5. Count sources
-        # ============================
-        source_breakdown = {}
-        for h in headlines:
-            source_breakdown[h.source] = source_breakdown.get(h.source, 0) + 1
-
-        # ============================
-        # 6. Create or update sentiment record
-        # ============================
-        def update_or_create_record():
-            record = db.query(SymbolSentiment).filter(
-                SymbolSentiment.symbol == ticker
-            ).first()
-            if record:
-                # Update
-                record.symbol_name = ticker_name
-                record.sentiment_score = sentiment_score
-                record.article_count = len(headlines)
-                record.source_breakdown = json.dumps(source_breakdown)
-                record.last_updated = datetime.utcnow()
-            else:
-                # Create new
-                record = SymbolSentiment(
-                    symbol=ticker,
-                    symbol_name=ticker_name,
-                    sentiment_score=sentiment_score,
-                    article_count=len(headlines),
-                    source_breakdown=json.dumps(source_breakdown),
-                    last_updated=datetime.utcnow()
-                )
-                db.add(record)
-
-            db.commit()
-            db.refresh(record)
-            return record
-
-        sentiment_record = await asyncio.to_thread(update_or_create_record)
-
-        logger.logMessage(
-            f"[API] Stored sentiment for {ticker}: "
-            f"score={sentiment_score:.3f}, articles={len(headlines)}, stored={stored_articles}"
-        )
-
-        return sentiment_record
-
+    except RateLimitedException as e:
+        logger.logMessage(f"[API] Rate-limited for {ticker}: {e}")
+        raise
+    except AggregatorException as e:
+        logger.logMessage(f"[API] Aggregator error for {ticker}: {e}")
+        raise
     except Exception as e:
-        logger.logMessage(f"[API] Error processing {ticker}: {e}")
-        db.rollback
-        return None
+        logger.logMessage(f"[API] Unexpected error fetching headlines for {ticker}: {e}")
+        raise
+
+    if not headlines:
+        logger.logMessage(f"[API] No headlines returned for {ticker}")
+        raise HTTPException(404, detail=f"No headlines found for {ticker}")
+
+    # ... continue storing articles and computing sentiment as before ...
+
 
 
 async def store_articles(symbol: str, headlines: List[Headline], db: Session) -> int:
@@ -569,72 +454,27 @@ async def root():
         "is_processing": app_state.is_processing
     }
     
-@app.post("/sentiment/{symbol}/score")
-async def get_sentiment_score(
-    symbol: str,
-    force_refresh: bool = False,
-    db: Session = Depends(get_db)
-):
-    """
-    Lightweight endpoint - returns just the sentiment score.
-    
-    - Checks database cache first (if not force_refresh)
-    - Aggregates new data if needed
-    - Returns minimal response with just the score
-    """
-    symbol = symbol.upper()
-    
-    # Get or create sentiment data
-    sentiment = await aggregate_and_store_ticker(
-        symbol, None, db, force_refresh
-    )
-    
-    if sentiment is None:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limited. Please try again later."
-        )
-    
-    return {
-        "symbol": symbol,
-        "sentiment_score": sentiment.sentiment_score,
-        "article_count": sentiment.article_count,
-        "last_updated": sentiment.last_updated.isoformat(),
-        "from_cache": not force_refresh
-    }
+from models.models import SentimentResponse
 
-
-@app.post("/sentiment/{symbol}", response_model=SentimentResponse)
-async def get_symbol_sentiment(
-    symbol: str,
-    force_refresh: bool = False,
-    db: Session = Depends(get_db)
-):
-    """
-    Get sentiment data for a specific symbol.
-    
-    - Checks database cache first (if not force_refresh)
-    - Aggregates new data if needed
-    - Stores and returns results
-    """
+@app.post("/sentiment/{symbol}/score", response_model=SentimentResponse)
+async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Session = Depends(get_db)):
     symbol = symbol.upper()
-    
-    # Get or create sentiment data
-    sentiment = await aggregate_and_store_ticker(
-        symbol, None, db, force_refresh
-    )
-    
-    if sentiment is None:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limited. Please try again later."
-        )
-    
+    try:
+        sentiment: SymbolSentiment = await aggregate_and_store_ticker(symbol, None, db, force_refresh)
+    except RateLimitedException as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except AggregatorException as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
     # Get recent articles for this symbol
     articles = db.query(NewsArticle).filter(
         NewsArticle.symbol == symbol
     ).order_by(NewsArticle.fetched_at.desc()).limit(50).all()
-    
+
     articles_data = [
         {
             "source": a.source,
@@ -646,7 +486,7 @@ async def get_symbol_sentiment(
         }
         for a in articles
     ]
-    
+
     return SentimentResponse(
         symbol=sentiment.symbol,
         symbol_name=sentiment.symbol_name,
@@ -657,57 +497,6 @@ async def get_symbol_sentiment(
         last_updated=sentiment.last_updated,
         from_cache=not force_refresh
     )
-
-
-@app.get("/sentiment/{symbol}/latest", response_model=SentimentResponse)
-async def get_cached_sentiment(
-    symbol: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Get the most recent cached sentiment data for a symbol.
-    Does NOT trigger new aggregation.
-    """
-    symbol = symbol.upper()
-    
-    sentiment = db.query(SymbolSentiment).filter(
-        SymbolSentiment.symbol == symbol
-    ).first()
-    
-    if not sentiment:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No sentiment data found for {symbol}"
-        )
-    
-    # Get recent articles for this symbol
-    articles = db.query(NewsArticle).filter(
-        NewsArticle.symbol == symbol
-    ).order_by(NewsArticle.fetched_at.desc()).limit(50).all()
-    
-    articles_data = [
-        {
-            "source": a.source,
-            "title": a.title,
-            "description": a.description,
-            "url": a.url,
-            "published_at": a.published_at,
-            "fetched_at": a.fetched_at.isoformat()
-        }
-        for a in articles
-    ]
-    
-    return SentimentResponse(
-        symbol=sentiment.symbol,
-        symbol_name=sentiment.symbol_name,
-        sentiment_score=sentiment.sentiment_score,
-        article_count=sentiment.article_count,
-        articles=articles_data,
-        source_breakdown=json.loads(sentiment.source_breakdown) if sentiment.source_breakdown else {},
-        last_updated=sentiment.last_updated,
-        from_cache=True
-    )
-
 
 @app.post("/migrate")
 async def migrate_json_data(

@@ -30,6 +30,17 @@ from services.utils import is_rate_limited
 
 logger = getLogger()
 
+class RateLimitedException(Exception):
+    """Raised when the news aggregator is rate limited"""
+    pass
+
+class NoHeadlinesException(Exception):
+    """Raised when no headlines were returned"""
+    pass
+class AggregatorException(Exception):
+    """Raised for general aggregator errors"""
+    pass
+
 # Add to the top of news_aggregator.py after imports
 
 def warmup_transformer_model():
@@ -223,8 +234,9 @@ class GoogleNewsClient(NewsClientBase):
 def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLimitCache = None) -> List[Headline]:
     """
     Aggregate headlines from prioritized sources.
-    - Returns [] on failure or no articles.
-    - Returns None only when a source indicates rate-limited (so caller can respect).
+    - Returns [] if no headlines found
+    - Returns None only if upstream indicates rate-limited
+    - Raises AggregatorException on network/API errors
     """
     clients = [
         ("newsapi", NewsAPIClient(rate_cache, logger)),
@@ -237,16 +249,17 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
         try:
             items = client.fetch(ticker, ticker_name)
         except Exception as e:
-            logger.logMessage(f"[Aggregator] {name} fetch exception: {e}")
-            items = []
+            # Real network/API errors -> raise
+            raise AggregatorException(f"{name} client failed for {ticker}: {e}") from e
+
         if items is None:
-            # upstream rate-limited; stop and return None so caller can back off
-            logger.logMessage(f"[Aggregator] {name} returned None (rate-limited); aborting further source calls")
-            return None
+            # Upstream told us to back off due to rate-limit
+            raise RateLimitedException(f"{name} client rate-limited for {ticker}")
         if items:
             aggregated.extend(items)
 
     return aggregated
+
 
 
 # -------------------------------------------------------
