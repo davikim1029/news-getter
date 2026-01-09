@@ -1,4 +1,4 @@
-# main.py
+# news_server.py
 """
 FastAPI News Aggregator Service
 
@@ -48,91 +48,152 @@ app_state = AppState()
 # ===========================
 async def aggregate_and_store_ticker(
     ticker: str,
-    ticker_name: Optional[str],
+    ticker_name: str | None,
     db: Session,
     force_refresh: bool = False
-) -> Optional[SymbolSentiment]:
+) -> SymbolSentiment | None:
     """
-    Aggregate news for a ticker and store in database.
-    Returns the stored/updated sentiment record.
+    Fully async-friendly version of aggregate_and_store_ticker.
+    - Uses asyncio.to_thread for all blocking DB/network work.
+    - Keeps the event loop responsive.
     """
     try:
-        # Check if we should use cached data
+        ticker = ticker.upper()
+
+        # ============================
+        # 1. Check cache
+        # ============================
         if not force_refresh:
-            existing = db.query(SymbolSentiment).filter(
-                SymbolSentiment.symbol == ticker.upper()
-            ).first()
-            
+            existing = await asyncio.to_thread(
+                lambda: db.query(SymbolSentiment)
+                          .filter(SymbolSentiment.symbol == ticker)
+                          .first()
+            )
             if existing:
                 age = datetime.utcnow() - existing.last_updated
-                if age.total_seconds() < 3600:  # Less than 1 hour old
+                if age.total_seconds() < 3600:
                     logger.logMessage(f"[API] Using cached data for {ticker} (age: {age})")
                     return existing
 
         logger.logMessage(f"[API] Aggregating news for {ticker}")
-        
-        # Fetch headlines
-        headlines = aggregate_headlines_smart(
-            ticker.upper(),
+
+        # ============================
+        # 2. Fetch headlines (blocking -> thread)
+        # ============================
+        headlines = await asyncio.to_thread(
+            aggregate_headlines_smart,
+            ticker,
             ticker_name or "",
-            rate_cache=app_state.rate_cache
+            app_state.rate_cache
         )
-        
-        if headlines is None:
+
+        if not headlines:
             logger.logMessage(f"[API] Rate limited for {ticker}")
             return None
-        
-        # Store individual articles in news_articles table
-        stored_articles = await store_articles(ticker.upper(), headlines, db)
-        
-        # Compute sentiment
+
+        # ============================
+        # 3. Store articles in DB
+        # ============================
+        def store_articles_thread():
+            stored_count = 0
+            from datetime import timedelta
+            cutoff_date = datetime.utcnow() - timedelta(days=30)
+
+            # Delete stale articles
+            deleted = db.query(NewsArticle).filter(
+                NewsArticle.symbol == ticker,
+                NewsArticle.fetched_at < cutoff_date
+            ).delete()
+            if deleted > 0:
+                logger.logMessage(f"[DB] Removed {deleted} stale articles for {ticker}")
+
+            # Add new articles
+            for h in headlines:
+                if h.url:
+                    existing_article = db.query(NewsArticle).filter(
+                        NewsArticle.url == h.url
+                    ).first()
+                    if existing_article:
+                        existing_article.fetched_at = datetime.utcnow()
+                        continue
+
+                article = NewsArticle(
+                    symbol=ticker,
+                    source=h.source or "unknown",
+                    title=h.title or "",
+                    description=h.description,
+                    url=h.url,
+                    published_at=h.published_at,
+                    fetched_at=datetime.utcnow()
+                )
+                db.add(article)
+                stored_count += 1
+
+            db.commit()
+            return stored_count
+
+
+        stored_articles = await asyncio.to_thread(store_articles_thread)
+
+        # ============================
+        # 4. Compute sentiment (blocking -> thread)
+        # ============================
         sentiment_score = 0.0
         if headlines:
             from services.news_aggregator import compute_headlines_sentiment
-            sentiment_score = compute_headlines_sentiment(headlines)
-        
-        # Count by source
+            sentiment_score = await asyncio.to_thread(
+                compute_headlines_sentiment, headlines
+            )
+
+        # ============================
+        # 5. Count sources
+        # ============================
         source_breakdown = {}
         for h in headlines:
             source_breakdown[h.source] = source_breakdown.get(h.source, 0) + 1
-        
-        # Create or update sentiment record
-        sentiment_record = db.query(SymbolSentiment).filter(
-            SymbolSentiment.symbol == ticker.upper()
-        ).first()
-        
-        if sentiment_record:
-            # Update existing
-            sentiment_record.symbol_name = ticker_name
-            sentiment_record.sentiment_score = sentiment_score
-            sentiment_record.article_count = len(headlines)
-            sentiment_record.source_breakdown = json.dumps(source_breakdown)
-            sentiment_record.last_updated = datetime.utcnow()
-        else:
-            # Create new
-            sentiment_record = SymbolSentiment(
-                symbol=ticker.upper(),
-                symbol_name=ticker_name,
-                sentiment_score=sentiment_score,
-                article_count=len(headlines),
-                source_breakdown=json.dumps(source_breakdown),
-                last_updated=datetime.utcnow()
-            )
-            db.add(sentiment_record)
-        
-        db.commit()
-        db.refresh(sentiment_record)
-        
+
+        # ============================
+        # 6. Create or update sentiment record
+        # ============================
+        def update_or_create_record():
+            record = db.query(SymbolSentiment).filter(
+                SymbolSentiment.symbol == ticker
+            ).first()
+            if record:
+                # Update
+                record.symbol_name = ticker_name
+                record.sentiment_score = sentiment_score
+                record.article_count = len(headlines)
+                record.source_breakdown = json.dumps(source_breakdown)
+                record.last_updated = datetime.utcnow()
+            else:
+                # Create new
+                record = SymbolSentiment(
+                    symbol=ticker,
+                    symbol_name=ticker_name,
+                    sentiment_score=sentiment_score,
+                    article_count=len(headlines),
+                    source_breakdown=json.dumps(source_breakdown),
+                    last_updated=datetime.utcnow()
+                )
+                db.add(record)
+
+            db.commit()
+            db.refresh(record)
+            return record
+
+        sentiment_record = await asyncio.to_thread(update_or_create_record)
+
         logger.logMessage(
             f"[API] Stored sentiment for {ticker}: "
             f"score={sentiment_score:.3f}, articles={len(headlines)}, stored={stored_articles}"
         )
-        
+
         return sentiment_record
-        
+
     except Exception as e:
         logger.logMessage(f"[API] Error processing {ticker}: {e}")
-        db.rollback()
+        db.rollback
         return None
 
 
@@ -192,60 +253,79 @@ async def store_articles(symbol: str, headlines: List[Headline], db: Session) ->
         return 0
 
 
+import asyncio
+from sqlalchemy.orm import Session
+
+BATCH_SIZE = 20  # process 20 tickers concurrently
+
 async def process_all_tickers(db: Session):
-    """Background task: Process all unique symbols from option_lifetimes table"""
+    """
+    Process all unique symbols in batches concurrently.
+    Prevents blocking the event loop and keeps the API responsive.
+    """
     if app_state.is_processing:
         logger.logMessage("[Scheduler] Already processing, skipping...")
         return
 
     symbol_map = load_symbol_map(db)
 
-    
+    # Get unique symbols
+    from sqlalchemy import distinct
+    symbols = db.query(distinct(OptionLifetime.symbol)).all()
+    unique_symbols = [s[0] for s in symbols if s[0]]
+
+    if not unique_symbols:
+        logger.logMessage("[Scheduler] No symbols to process")
+        return
+
+    logger.logMessage(f"[Scheduler] Processing {len(unique_symbols)} unique symbols")
+
+    app_state.is_processing = True
+    processed = 0
+    errors = 0
+
     try:
-        app_state.is_processing = True
-        logger.logMessage("[Scheduler] Starting batch processing")
-        
-        # Get unique symbols from option_lifetimes table
-        from sqlalchemy import distinct
-        symbols = db.query(distinct(OptionLifetime.symbol)).all()
-        unique_symbols = [s[0] for s in symbols if s[0]]
-        total = len(unique_symbols)
-        
-        logger.logMessage(f"[Scheduler] Processing {total} unique symbols")
-        
-        processed = 0
-        errors = 0
-        
-        for symbol in unique_symbols:
-            try:
-                ticker_name = symbol_map.get(symbol) 
-                result = await aggregate_and_store_ticker(
-                    symbol,
-                    ticker_name,
-                    db,
-                    force_refresh=False
-                )
-                
-                if result:
+        # Split symbols into batches
+        for i in range(0, len(unique_symbols), BATCH_SIZE):
+            batch = unique_symbols[i:i+BATCH_SIZE]
+
+            # Create tasks for this batch
+            tasks = [
+                process_single_ticker(symbol, symbol_map.get(symbol))
+                for symbol in batch
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Count successes/errors
+            for r in results:
+                if isinstance(r, Exception):
+                    errors += 1
+                    logger.logMessage(f"[Scheduler] Error in batch: {r}")
+                elif r:
                     processed += 1
                 else:
                     errors += 1
-                
-                # Small delay to avoid hammering APIs
-                await asyncio.sleep(2)
-                
-            except Exception as e:
-                logger.logMessage(f"[Scheduler] Error processing {symbol}: {e}")
-                errors += 1
-        
+
+            # Yield to event loop to prevent blocking
+            await asyncio.sleep(0.1)
+
         logger.logMessage(
             f"[Scheduler] Batch complete: {processed} processed, {errors} errors"
         )
-        
-    except Exception as e:
-        logger.logMessage(f"[Scheduler] Batch processing error: {e}")
+
     finally:
         app_state.is_processing = False
+
+
+async def process_single_ticker(symbol: str, ticker_name: str | None):
+    db = SessionLocal()
+    try:
+        return await aggregate_and_store_ticker(symbol, ticker_name, db)
+    finally:
+        db.close()
+
+
 
 from sqlalchemy import text
 
@@ -370,20 +450,21 @@ async def start_scheduler():
     await save_tickers_to_db(db=SessionLocal())
     
     app_state.scheduler.add_job(
-        process_all_tickers,
+        job_wrapper,
         trigger=IntervalTrigger(minutes=interval_minutes),
         id="news_aggregation",
         name="Aggregate news for all tickers",
         replace_existing=True,
-        kwargs={"db": SessionLocal()}
+        kwargs={"job_func": process_all_tickers}  # job_wrapper now calls this
     )
+    
     app_state.scheduler.add_job(
-        save_tickers_to_db,
+        job_wrapper,
         trigger=IntervalTrigger(weeks=2),
         id="ticker_saver",
         name="Fetch and save US tickers to database",
         replace_existing=True,
-        kwargs={"db": SessionLocal()}
+        kwargs={"job_func": save_tickers_to_db}
     )
         
     app_state.scheduler.start()
@@ -841,6 +922,35 @@ async def cleanup_stale_articles(
         "cutoff_date": cutoff_date.isoformat(),
         "message": f"Removed {deleted} articles older than {days} days"
     }
+    
+    
+from typing import Callable
+from sqlalchemy.orm import Session
+import asyncio
+
+async def job_wrapper(job_func: Callable[..., asyncio.Future], **kwargs):
+    """
+    Generic wrapper for scheduler jobs.
+    - Creates a fresh DB session per run
+    - Runs the job in an async-safe way
+    - Ensures the DB session is closed even if job fails
+    - Runs blocking sync functions in a thread if needed
+    """
+    # Create a fresh DB session if not provided
+    db: Session = kwargs.get("db") or SessionLocal()
+    kwargs["db"] = db  # ensure job_func gets a db param
+    
+    try:
+        if asyncio.iscoroutinefunction(job_func):
+            await job_func(**kwargs)
+        else:
+            # If the job_func is synchronous (blocking), run it in a thread
+            await asyncio.to_thread(job_func, **kwargs)
+    except Exception as e:
+        logger.logMessage(f"[Scheduler] Error in job {job_func.__name__}: {e}")
+    finally:
+        db.close()
+
 
 
 if __name__ == "__main__":

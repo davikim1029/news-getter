@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#main.py
 """
 News Aggregator Server Manager
 
@@ -340,6 +340,20 @@ def get_mode_from_prompt():
         
         print("Invalid choice, try again.")
 
+import requests, time
+
+def wait_for_server(port=PORT, timeout=10):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            r = requests.get(f"http://localhost:{port}", timeout=1)
+            if r.status_code == 200:
+                return True
+        except requests.ConnectionError:
+            pass
+        time.sleep(0.5)
+    return False
+
 
 # -----------------------------
 # Main Entry Point
@@ -355,6 +369,11 @@ def main():
         
         if mode == "start-server":
             start_server()
+            if wait_for_server():
+                print("Server ready to receive API calls.")
+            else:
+                print("Server did not start properly, check logs.")
+
             
         elif mode == "monitor":
             monitor_loop()
