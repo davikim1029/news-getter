@@ -8,7 +8,7 @@ Features:
 3. REST API for on-demand news retrieval
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Query
 from typing import Optional, List, Dict, Any
 from dateutil.parser import parse as parse_datetime
 from datetime import datetime, timezone
