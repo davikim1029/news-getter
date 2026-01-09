@@ -80,7 +80,7 @@ async def aggregate_and_store_ticker(
                 lambda: db.query(SymbolSentiment).filter(SymbolSentiment.symbol == ticker).first()
             )
             if existing:
-                age = datetime.utcnow() - existing.last_updated
+                age = datetime.now(timezone.utc)() - existing.last_updated
                 if age.total_seconds() < 3600:
                     logger.logMessage(f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)")
                     # Fetch recent articles for response
@@ -124,7 +124,7 @@ async def aggregate_and_store_ticker(
             def _store() -> int:
                 stored_count = 0
                 from datetime import timedelta
-                cutoff_date = datetime.utcnow() - timedelta(days=30)
+                cutoff_date = datetime.now(timezone.utc)() - timedelta(days=30)
                 deleted = db.query(NewsArticle).filter(
                     NewsArticle.symbol == ticker,
                     NewsArticle.fetched_at < cutoff_date
@@ -136,7 +136,7 @@ async def aggregate_and_store_ticker(
                     if h.url:
                         existing = db.query(NewsArticle).filter(NewsArticle.url == h.url).first()
                         if existing:
-                            existing.fetched_at = datetime.utcnow()
+                            existing.fetched_at = datetime.now(timezone.utc)()
                             continue
                     db.add(NewsArticle(
                         symbol=ticker,
@@ -144,8 +144,8 @@ async def aggregate_and_store_ticker(
                         title=h.title or "",
                         description=h.description,
                         url=h.url,
-                        published_at=h.published_at,
-                        fetched_at=datetime.utcnow()
+                        published_at=h.published_at if h.published_at else None,
+                        fetched_at=datetime.now(timezone.utc)
                     ))
                     stored_count += 1
 
@@ -160,8 +160,8 @@ async def aggregate_and_store_ticker(
                     "title": h.title or "",
                     "description": h.description,
                     "url": h.url,
-                    "published_at": h.published_at,
-                    "fetched_at": datetime.utcnow().isoformat()
+                    "published_at": h.published_at.isoformat() if h.published_at else None,
+                    "fetched_at": datetime.now(timezone.utc).isoformat()
                 }
                 for h in headlines
             ]
@@ -191,7 +191,7 @@ async def aggregate_and_store_ticker(
                 record.sentiment_score = sentiment_score
                 record.article_count = len(headlines)
                 record.source_breakdown = json.dumps(source_breakdown)
-                record.last_updated = datetime.utcnow()
+                record.last_updated = datetime.now(timezone.utc)
             else:
                 record = SymbolSentiment(
                     symbol=ticker,
@@ -199,7 +199,7 @@ async def aggregate_and_store_ticker(
                     sentiment_score=sentiment_score,
                     article_count=len(headlines),
                     source_breakdown=json.dumps(source_breakdown),
-                    last_updated=datetime.utcnow()
+                    last_updated=datetime.now(timezone.utc)
                 )
                 db.add(record)
             db.commit()
@@ -239,7 +239,7 @@ async def store_articles(symbol: str, headlines: List[Headline], db: Session) ->
         
         # Clean up stale articles first (older than 30 days)
         from datetime import timedelta
-        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        cutoff_date = datetime.now(timezone.utc)() - timedelta(days=30)
         deleted = db.query(NewsArticle).filter(
             NewsArticle.symbol == symbol,
             NewsArticle.fetched_at < cutoff_date
@@ -258,7 +258,7 @@ async def store_articles(symbol: str, headlines: List[Headline], db: Session) ->
                 
                 if existing:
                     # Update fetched_at to keep it fresh
-                    existing.fetched_at = datetime.utcnow()
+                    existing.fetched_at = datetime.now(timezone.utc)
                     continue
             
             # Create new article
@@ -268,8 +268,8 @@ async def store_articles(symbol: str, headlines: List[Headline], db: Session) ->
                 title=h.title or "",
                 description=h.description,
                 url=h.url,
-                published_at=h.published_at,
-                fetched_at=datetime.utcnow()
+                published_at=h.published_at if h.published_at else None,
+                fetched_at=datetime.now(timezone.utc)
             )
             db.add(article)
             stored_count += 1
@@ -424,12 +424,10 @@ def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict
                 if timestamp_str:
                     try:
                         timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        # Convert to naive datetime for SQLite
-                        timestamp = timestamp.replace(tzinfo=None)
                     except:
-                        timestamp = datetime.utcnow()
+                        timestamp = datetime.now(timezone.utc)
                 else:
-                    timestamp = datetime.utcnow()
+                    timestamp = datetime.now(timezone.utc)          
                 
                 record = TickerSentiment(
                     ticker=ticker.upper(),
@@ -524,7 +522,7 @@ async def save_tickers_to_db(db: Session = None):
                     {
                         "symbol": symbol,
                         "name": name,
-                        "timestamp": datetime.utcnow(),
+                        "timestamp": datetime.now(timezone.utc)(),
                     },
                 )
         db.commit()
@@ -700,7 +698,7 @@ async def get_scheduler_status():
         jobs.append({
             "id": job.id,
             "name": job.name,
-            "next_run": job.next_run_time.isoformat() if job.next_run_time else None
+            "next_run": job.next_run_time if job.next_run_time else None
         })
     
     return {
@@ -771,7 +769,7 @@ async def get_statistics(db: Session = Depends(get_db)):
                 "symbol": r.symbol,
                 "sentiment": r.sentiment_score,
                 "article_count": r.article_count,
-                "last_updated": r.last_updated.isoformat()
+                "last_updated": r.last_updated
             }
             for r in recent_updates
         ]
@@ -827,8 +825,8 @@ async def get_symbol_articles(
                 "title": a.title,
                 "description": a.description,
                 "url": a.url,
-                "published_at": a.published_at,
-                "fetched_at": a.fetched_at.isoformat()
+                "published_at": a.published_at.isoformat() if a.published_at else None,
+                "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
             }
             for a in articles
         ]
@@ -843,7 +841,7 @@ async def cleanup_stale_articles(
     """Remove articles older than specified days"""
     from datetime import timedelta
     
-    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
     
     deleted = db.query(NewsArticle).filter(
         NewsArticle.fetched_at < cutoff_date
