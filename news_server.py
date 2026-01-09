@@ -130,7 +130,7 @@ async def aggregate_and_store_ticker(
             def _store() -> int:
                 stored_count = 0
                 from datetime import timedelta
-                cutoff_date = datetime.now(timezone.utc)() - timedelta(days=30)
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
                 deleted = db.query(NewsArticle).filter(
                     NewsArticle.symbol == ticker,
                     NewsArticle.fetched_at < cutoff_date
