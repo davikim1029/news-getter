@@ -80,7 +80,7 @@ async def aggregate_and_store_ticker(
                 lambda: db.query(SymbolSentiment).filter(SymbolSentiment.symbol == ticker).first()
             )
             if existing:
-                age = datetime.now(timezone.utc)() - existing.last_updated
+                age = datetime.now(timezone.utc) - existing.last_updated
                 if age.total_seconds() < 3600:
                     logger.logMessage(f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)")
                     # Fetch recent articles for response
@@ -136,7 +136,7 @@ async def aggregate_and_store_ticker(
                     if h.url:
                         existing = db.query(NewsArticle).filter(NewsArticle.url == h.url).first()
                         if existing:
-                            existing.fetched_at = datetime.now(timezone.utc)()
+                            existing.fetched_at = datetime.now(timezone.utc)
                             continue
                     db.add(NewsArticle(
                         symbol=ticker,
@@ -239,7 +239,7 @@ async def store_articles(symbol: str, headlines: List[Headline], db: Session) ->
         
         # Clean up stale articles first (older than 30 days)
         from datetime import timedelta
-        cutoff_date = datetime.now(timezone.utc)() - timedelta(days=30)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
         deleted = db.query(NewsArticle).filter(
             NewsArticle.symbol == symbol,
             NewsArticle.fetched_at < cutoff_date
@@ -522,7 +522,7 @@ async def save_tickers_to_db(db: Session = None):
                     {
                         "symbol": symbol,
                         "name": name,
-                        "timestamp": datetime.now(timezone.utc)(),
+                        "timestamp": datetime.now(timezone.utc),
                     },
                 )
         db.commit()
