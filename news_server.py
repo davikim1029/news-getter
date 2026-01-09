@@ -10,6 +10,7 @@ Features:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from typing import Optional, List, Dict, Any
+from dateutil.parser import parse as parse_datetime
 from datetime import datetime, timezone
 import asyncio
 import os
@@ -97,7 +98,13 @@ async def aggregate_and_store_ticker(
                                 "title": a.title,
                                 "description": a.description,
                                 "url": a.url,
-                                "published_at": a.published_at.isoformat() if a.published_at else None,
+                                "published_at": (
+                                    h.published_at.isoformat()
+                                    if isinstance(h.published_at, datetime)
+                                    else parse_datetime(h.published_at).isoformat()
+                                    if h.published_at
+                                    else None
+                                ),
                                 "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
                             }
                             for a in db.query(NewsArticle)
@@ -166,7 +173,13 @@ async def aggregate_and_store_ticker(
                     "title": h.title or "",
                     "description": h.description,
                     "url": h.url,
-                    "published_at": h.published_at.isoformat() if h.published_at else None,
+                    "published_at": (
+                        h.published_at.isoformat()
+                        if isinstance(h.published_at, datetime)
+                        else parse_datetime(h.published_at).isoformat()
+                        if h.published_at
+                        else None
+                    ),
                     "fetched_at": datetime.now(timezone.utc).isoformat()
                 }
                 for h in headlines
@@ -831,7 +844,13 @@ async def get_symbol_articles(
                 "title": a.title,
                 "description": a.description,
                 "url": a.url,
-                "published_at": a.published_at.isoformat() if a.published_at else None,
+                "published_at": (
+                    h.published_at.isoformat()
+                    if isinstance(h.published_at, datetime)
+                    else parse_datetime(h.published_at).isoformat()
+                    if h.published_at
+                    else None
+                ),
                 "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
             }
             for a in articles
