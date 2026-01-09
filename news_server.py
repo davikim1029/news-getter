@@ -80,7 +80,13 @@ async def aggregate_and_store_ticker(
                 lambda: db.query(SymbolSentiment).filter(SymbolSentiment.symbol == ticker).first()
             )
             if existing:
-                age = datetime.now(timezone.utc) - existing.last_updated
+                if existing.last_updated.tzinfo is None:
+                    last_updated_aware = existing.last_updated.replace(tzinfo=timezone.utc)
+                else:
+                    last_updated_aware = existing.last_updated
+
+                age = datetime.now(timezone.utc) - last_updated_aware
+
                 if age.total_seconds() < 3600:
                     logger.logMessage(f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)")
                     # Fetch recent articles for response
