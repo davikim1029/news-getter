@@ -25,7 +25,7 @@ from models.models import (
     SchedulerConfig,
     AppState,
     TickerSentiment,
-    orm_to_out
+    sentiment_to_dict
 )
 from database.database import (engine, SessionLocal, init_database, get_db)
 from sqlalchemy.orm import sessionmaker, Session
@@ -90,7 +90,7 @@ async def aggregate_and_store_ticker(
                     logger.logMessage(
                         f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)"
                     )
-                    out= orm_to_out(existing)
+                    out= sentiment_to_dict(existing)
                     logger.logMessage(f"[API] Returning cached sentiment for {ticker}: {out}")
                     return out
      
@@ -223,7 +223,7 @@ async def aggregate_and_store_ticker(
             f"[API] {ticker}: sentiment={sentiment_score:.3f}, "
             f"articles={len(headlines)}, stored={stored_articles if headlines else 0}"
         )
-        out = orm_to_out(sentiment_record)
+        out = sentiment_to_dict(sentiment_record)
         return out
 
     except RateLimitedException:

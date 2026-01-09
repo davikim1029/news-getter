@@ -119,17 +119,16 @@ class OptionLifetime(Base):
     symbol = Column(Text, nullable=False, index=True)
 
 
-
-from fastapi import HTTPException
 import json
 
-# Convert ORM → Pydantic before returning
-def orm_to_out(record: SymbolSentiment) -> SymbolSentimentOut:
-    return SymbolSentimentOut(
-        symbol=record.symbol,
-        symbol_name=record.symbol_name,
-        sentiment_score=record.sentiment_score or 0.0,
-        article_count=record.article_count or 0,
-        source_breakdown=json.loads(record.source_breakdown or "{}"),
-        last_updated=record.last_updated,
-    )
+# Step 1: Convert ORM → dict before caching
+def sentiment_to_dict(record: SymbolSentiment):
+    return {
+        "symbol": record.symbol,
+        "symbol_name": record.symbol_name,
+        "sentiment_score": record.sentiment_score or 0.0,
+        "article_count": record.article_count or 0,
+        "source_breakdown": json.loads(record.source_breakdown or "{}"),
+        "last_updated": record.last_updated.isoformat() if record.last_updated else None,
+        "from_cache": True,
+    }
