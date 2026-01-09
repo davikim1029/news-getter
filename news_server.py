@@ -182,7 +182,6 @@ async def aggregate_and_store_ticker(
                     ),
                     "fetched_at": datetime.now(timezone.utc).isoformat()
                 }
-                for h in headlines
             ]
 
         articles_data = await store_articles()
