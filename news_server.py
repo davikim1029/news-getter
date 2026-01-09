@@ -621,6 +621,7 @@ from models.models import SentimentResponse
 @app.post("/sentiment/{symbol}/score", response_model=SentimentResponse)
 async def get_sentiment_score(
     symbol: str,
+    include_articles: bool = Query(False, description="Include full article info"),
     force_refresh: bool = False,
     db: Session = Depends(get_db)
 ):
@@ -654,6 +655,9 @@ async def get_sentiment_score(
     # Set from_cache properly
     sentiment_data["from_cache"] = not force_refresh
 
+    if not include_articles:
+        sentiment_data["articles"] = []
+        
     # Construct Pydantic response
     response = SentimentResponse(**sentiment_data)
 
