@@ -181,7 +181,7 @@ async def aggregate_and_store_ticker(
                         else None
                     ),
                     "fetched_at": datetime.now(timezone.utc).isoformat()
-                }
+                } for h in headlines[:50
             ]
 
         articles_data = await store_articles()
@@ -849,10 +849,10 @@ async def get_symbol_articles(
                 "description": a.description,
                 "url": a.url,
                 "published_at": (
-                    h.published_at.isoformat()
-                    if isinstance(h.published_at, datetime)
-                    else parse_datetime(h.published_at).isoformat()
-                    if h.published_at
+                    a.published_at.isoformat()
+                    if isinstance(a.published_at, datetime)
+                    else parse_datetime(a.published_at).isoformat()
+                    if a.published_at
                     else None
                 ),
                 "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
