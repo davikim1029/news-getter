@@ -121,14 +121,35 @@ class OptionLifetime(Base):
 
 import json
 
-# Step 1: Convert ORM → dict before caching
-def sentiment_to_dict(record: SymbolSentiment):
+def sentiment_to_dict(
+    record: SymbolSentiment,
+    articles: Optional[List[Dict[str, Any]]] = None,
+    from_cache: bool = True
+) -> dict:
+    """
+    Convert SymbolSentiment ORM object to dict compatible with SentimentResponse.
+
+    Parameters
+    ----------
+    record : SymbolSentiment
+        The ORM object from the database.
+    articles : Optional[List[Dict[str, Any]]]
+        Pre-fetched list of article dicts. Defaults to empty list.
+    from_cache : bool
+        Whether this data came from cache. Defaults to True.
+
+    Returns
+    -------
+    dict
+        Fully JSON-serializable dict for Pydantic response.
+    """
     return {
         "symbol": record.symbol,
         "symbol_name": record.symbol_name,
         "sentiment_score": record.sentiment_score or 0.0,
         "article_count": record.article_count or 0,
+        "articles": articles or [],
         "source_breakdown": json.loads(record.source_breakdown or "{}"),
-        "last_updated": record.last_updated.isoformat() if record.last_updated else None,
-        "from_cache": True,
+        "last_updated": record.last_updated or datetime.utcnow(),
+        "from_cache": from_cache,
     }
