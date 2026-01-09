@@ -233,10 +233,12 @@ class GoogleNewsClient(NewsClientBase):
 # -------------------------------------------------------
 def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLimitCache = None) -> List[Headline]:
     """
-    Aggregate headlines from prioritized sources.
-    - Returns [] if no headlines found
-    - Returns None only if upstream indicates rate-limited
-    - Raises AggregatorException on network/API errors
+    Aggregate headlines from multiple sources.
+    - Returns combined headlines from all sources that succeeded.
+    - Logs per-client exceptions.
+    - Raises:
+        - RateLimitedException if any source indicates rate-limit and no data was collected
+        - AggregatorException only if all sources failed
     """
     clients = [
         ("newsapi", NewsAPIClient(rate_cache, logger)),
@@ -245,20 +247,45 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
     ]
 
     aggregated: List[Headline] = []
+    exceptions: list[tuple[str, Exception]] = []
+    rate_limited_sources: list[str] = []
+
     for name, client in clients:
         try:
             items = client.fetch(ticker, ticker_name)
+            if items is None:
+                # Upstream rate-limited
+                rate_limited_sources.append(name)
+            elif items:
+                aggregated.extend(items)
         except Exception as e:
-            # Real network/API errors -> raise
-            raise AggregatorException(f"{name} client failed for {ticker}: {e}") from e
+            # Log and store the exception for later
+            logger.logMessage(f"[Aggregator] {name} client failed for {ticker}: {e}")
+            exceptions.append((name, e))
 
-        if items is None:
-            # Upstream told us to back off due to rate-limit
-            raise RateLimitedException(f"{name} client rate-limited for {ticker}")
-        if items:
-            aggregated.extend(items)
+    if aggregated:
+        # Return whatever we managed to collect
+        if exceptions or rate_limited_sources:
+            logger.logMessage(
+                f"[Aggregator] Partial failures for {ticker}: "
+                f"exceptions={[(n,type(e).__name__) for n,e in exceptions]}, "
+                f"rate_limited={rate_limited_sources}"
+            )
+        return aggregated
 
-    return aggregated
+    # If nothing was collected, decide what to raise
+    if rate_limited_sources:
+        raise RateLimitedException(
+            f"All sources failed or rate-limited for {ticker}: {rate_limited_sources}"
+        )
+    elif exceptions:
+        raise AggregatorException(
+            f"All sources failed for {ticker}: "
+            + ", ".join([f"{n}: {type(e).__name__}" for n, e in exceptions])
+        )
+    else:
+        # No data but no explicit exceptions? Defensive fallback
+        return []
 
 
 
