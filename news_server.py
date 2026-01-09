@@ -90,7 +90,9 @@ async def aggregate_and_store_ticker(
                     logger.logMessage(
                         f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)"
                     )
-                    return orm_to_out(existing)
+                    out= orm_to_out(existing)
+                    logger.logMessage(f"[API] Returning cached sentiment for {ticker}: {out}")
+                    return out
      
 
         logger.logMessage(f"[API] Aggregating news for {ticker}")
