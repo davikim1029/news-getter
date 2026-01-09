@@ -481,8 +481,8 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
             "title": a.title,
             "description": a.description,
             "url": a.url,
-            "published_at": a.published_at,
-            "fetched_at": a.fetched_at.isoformat()
+            "published_at": a.published_at.isoformat() if a.published_at else None,
+            "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
         }
         for a in articles
     ]
@@ -494,7 +494,7 @@ async def get_sentiment_score(symbol: str, force_refresh: bool = False, db: Sess
         article_count=sentiment.article_count,
         articles=articles_data,
         source_breakdown=json.loads(sentiment.source_breakdown) if sentiment.source_breakdown else {},
-        last_updated=sentiment.last_updated,
+        last_updated=sentiment.last_updated.isoformat() if sentiment.last_updated else None,
         from_cache=not force_refresh
     )
 
