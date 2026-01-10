@@ -205,7 +205,8 @@ async def aggregate_and_store_ticker(
         def upsert() -> SymbolSentiment:
             record = db.query(SymbolSentiment).filter(SymbolSentiment.symbol == ticker).first()
             if record:
-                record.symbol_name = ticker_name
+                if ticker_name is not None:
+                  record.symbol_name = ticker_name
                 record.sentiment_score = sentiment_score
                 record.article_count = len(headlines)
                 record.source_breakdown = json.dumps(source_breakdown)
@@ -636,7 +637,7 @@ async def get_sentiment_score(
         # aggregate_and_store_ticker now returns a dict compatible with SentimentResponse
         sentiment_data = await aggregate_and_store_ticker(
             ticker=symbol,
-            ticker_name=None,
+            ticker_name=load_symbol_map(db).get(symbol),
             db=db,
             force_refresh=force_refresh
         )
