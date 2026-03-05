@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "news-getter"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "shared-options",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy>=2.0.25",
+    "psycopg[binary]>=3.2.10",
+    "alembic>=1.13.1",
+    "apscheduler>=3.10.4",
+    "feedparser>=6.0.11",
+    "transformers>=4.36.0",
+    "torch>=2.1.0",
+    "accelerate>=0.25.0",
+    "yfinance<0.2.65",
+]
+
+[tool.uv]
+package = false
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+
+[tool.uv.sources]
+shared-options = { path = "../options-shared", editable = true }

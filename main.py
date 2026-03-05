@@ -24,7 +24,8 @@ logger = getLogger()
 # -----------------------------
 PORT = 9000
 PID_FILE = Path("news_server.pid")
-APP_NAME = "news_server:app" 
+STOP_FLAG = Path("news_server.stop")
+APP_NAME = "news_server:app"
 APP_NAME_FRAGMENT = "news_server"
 LOG_FILE = Path("news_server.log")
 
@@ -136,13 +137,16 @@ def cleanup_previous_instance():
 def start_server():
     """Start the news aggregator server"""
     global server_start_time
-    
+
     if is_server_running():
         pid = int(PID_FILE.read_text())
         print(f"Server is already running with PID {pid}")
         if server_start_time:
             print(f"Started at: {server_start_time}")
         return
+
+    if STOP_FLAG.exists():
+        STOP_FLAG.unlink()
 
     # Clean up any previous instances
     cleanup_previous_instance()
@@ -171,6 +175,8 @@ def start_server():
 
 def stop_server():
     """Stop the news aggregator server"""
+    STOP_FLAG.write_text("1")
+
     if not PID_FILE.exists():
         print("No PID file found. Server may not be running.")
         cleanup_previous_instance()
@@ -227,15 +233,26 @@ def monitor_loop():
 
     while True:
         try:
+            if STOP_FLAG.exists():
+                logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
+                break
+
             if is_server_running():
-                time.sleep(HEARTBEAT)
+                for _ in range(HEARTBEAT // 5):
+                    if STOP_FLAG.exists():
+                        break
+                    time.sleep(5)
                 continue
 
             # Server is down, restart it
+            if STOP_FLAG.exists():
+                logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
+                break
+
             server_start_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
             logger.logMessage(f"Server down, restarting at {server_start_time}")
             print(f"\n[{server_start_time}] Server crashed, restarting...")
-            
+
             if PID_FILE.exists():
                 PID_FILE.unlink(missing_ok=True)
 
@@ -250,9 +267,13 @@ def monitor_loop():
                 print(f"Restarted with PID {process.pid}")
                 process.wait()  # Wait until server exits
 
+            if STOP_FLAG.exists():
+                logger.logMessage("Server stopped cleanly, monitor exiting.")
+                break
+
             logger.logMessage(f"Server exited, restarting in {RESTART_DELAY}s...")
             time.sleep(RESTART_DELAY)
-            
+
         except KeyboardInterrupt:
             print("\n\nMonitoring stopped by user.")
             break
