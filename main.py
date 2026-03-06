@@ -228,6 +228,9 @@ def monitor_loop():
     """Continuously monitor the server and restart if it crashes"""
     global server_start_time
 
+    if STOP_FLAG.exists():
+        STOP_FLAG.unlink()
+
     print(f"Starting monitoring loop (checking every {HEARTBEAT}s)...")
     print("Press Ctrl+C to stop monitoring")
 
