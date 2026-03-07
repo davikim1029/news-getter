@@ -358,8 +358,8 @@ def stats():
 def get_mode_from_prompt():
     """Interactive mode selection"""
     modes = [
-        ("start-server", "Start the news aggregator server"),
-        ("monitor", "Monitor the server and auto-restart if crashed"),
+        ("start-server", "Start server in background (detached, exits immediately, no auto-restart)"),
+        ("monitor", "Run in foreground — starts server and auto-restarts on crash [recommended for process monitor]"),
         ("stop", "Stop the server"),
         ("check", "Check server status"),
         ("stats", "Show server statistics"),
