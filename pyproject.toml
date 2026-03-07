@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "news-getter"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "shared-options",
     "fastapi>=0.109.0",
@@ -32,4 +32,3 @@ explicit = true
 [tool.uv.sources]
 shared-options = { path = "../options-shared", editable = true }
 torch = [{ index = "pytorch-cpu" }]
-accelerate = [{ index = "pytorch-cpu" }]
