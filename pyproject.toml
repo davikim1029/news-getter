@@ -23,7 +23,13 @@ dependencies = [
 
 [tool.uv]
 package = false
-extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.sources]
 shared-options = { path = "../options-shared", editable = true }
+torch = [{ index = "pytorch-cpu" }]
+accelerate = [{ index = "pytorch-cpu" }]
