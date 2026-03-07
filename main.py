@@ -358,8 +358,8 @@ def stats():
 def get_mode_from_prompt():
     """Interactive mode selection"""
     modes = [
-        ("start-server", "Start server in background (detached, exits immediately, no auto-restart)"),
-        ("monitor", "Run in foreground — starts server and auto-restarts on crash [recommended for process monitor]"),
+        ("start-server", "Start server in background (detached) [recommended for process monitor]"),
+        ("monitor", "Run in foreground — starts server and auto-restarts on crash (standalone use)"),
         ("stop", "Stop the server"),
         ("check", "Check server status"),
         ("stats", "Show server statistics"),
@@ -425,10 +425,6 @@ def main():
         
         if mode == "start-server":
             start_server()
-            if wait_for_server():
-                print("Server ready to receive API calls.")
-            else:
-                print("Server did not start properly, check logs.")
 
             
         elif mode == "monitor":
