@@ -25,6 +25,7 @@ logger = getLogger()
 PORT = 9000
 PID_FILE = Path("news_server.pid")
 STOP_FLAG = Path("news_server.stop")
+MONITOR_PID_FILE = Path("news_monitor.pid")
 APP_NAME = "news_server:app"
 APP_NAME_FRAGMENT = "news_server"
 LOG_FILE = Path("news_server.log")
@@ -177,6 +178,15 @@ def stop_server():
     """Stop the news aggregator server"""
     STOP_FLAG.write_text("1")
 
+    # Kill the monitor process directly so it can't restart the server
+    if MONITOR_PID_FILE.exists():
+        try:
+            monitor_pid = int(MONITOR_PID_FILE.read_text())
+            os.kill(monitor_pid, signal.SIGTERM)
+        except (ValueError, ProcessLookupError):
+            pass
+        MONITOR_PID_FILE.unlink(missing_ok=True)
+
     if not PID_FILE.exists():
         print("No PID file found. Server may not be running.")
         cleanup_previous_instance()
@@ -231,55 +241,77 @@ def monitor_loop():
     if STOP_FLAG.exists():
         STOP_FLAG.unlink()
 
+    MONITOR_PID_FILE.write_text(str(os.getpid()))
+    _proc = [None]  # mutable ref to current child process for signal handler
+
+    def _on_sigterm(signum, frame):
+        logger.logMessage("Monitor received SIGTERM, shutting down.")
+        STOP_FLAG.write_text("1")
+        if _proc[0] is not None:
+            try:
+                os.killpg(_proc[0].pid, signal.SIGTERM)
+            except Exception:
+                pass
+        MONITOR_PID_FILE.unlink(missing_ok=True)
+        PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     print(f"Starting monitoring loop (checking every {HEARTBEAT}s)...")
     print("Press Ctrl+C to stop monitoring")
 
-    while True:
-        try:
-            if STOP_FLAG.exists():
-                logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
+    try:
+        while True:
+            try:
+                if STOP_FLAG.exists():
+                    logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
+                    break
+
+                if is_server_running():
+                    for _ in range(HEARTBEAT // 5):
+                        if STOP_FLAG.exists():
+                            break
+                        time.sleep(5)
+                    continue
+
+                # Server is down, restart it
+                if STOP_FLAG.exists():
+                    logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
+                    break
+
+                server_start_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                logger.logMessage(f"Server down, restarting at {server_start_time}")
+                print(f"\n[{server_start_time}] Server crashed, restarting...")
+
+                if PID_FILE.exists():
+                    PID_FILE.unlink(missing_ok=True)
+
+                with LOG_FILE.open("a") as log_file:
+                    process = subprocess.Popen(
+                        UVICORN_CMD,
+                        stdout=log_file,
+                        stderr=log_file,
+                        start_new_session=True
+                    )
+                    _proc[0] = process
+                    PID_FILE.write_text(str(process.pid))
+                    print(f"Restarted with PID {process.pid}")
+                    process.wait()  # Wait until server exits
+                    _proc[0] = None
+
+                if STOP_FLAG.exists():
+                    logger.logMessage("Server stopped cleanly, monitor exiting.")
+                    break
+
+                logger.logMessage(f"Server exited, restarting in {RESTART_DELAY}s...")
+                time.sleep(RESTART_DELAY)
+
+            except KeyboardInterrupt:
+                print("\n\nMonitoring stopped by user.")
                 break
-
-            if is_server_running():
-                for _ in range(HEARTBEAT // 5):
-                    if STOP_FLAG.exists():
-                        break
-                    time.sleep(5)
-                continue
-
-            # Server is down, restart it
-            if STOP_FLAG.exists():
-                logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
-                break
-
-            server_start_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            logger.logMessage(f"Server down, restarting at {server_start_time}")
-            print(f"\n[{server_start_time}] Server crashed, restarting...")
-
-            if PID_FILE.exists():
-                PID_FILE.unlink(missing_ok=True)
-
-            with LOG_FILE.open("a") as log_file:
-                process = subprocess.Popen(
-                    UVICORN_CMD,
-                    stdout=log_file,
-                    stderr=log_file,
-                    start_new_session=True
-                )
-                PID_FILE.write_text(str(process.pid))
-                print(f"Restarted with PID {process.pid}")
-                process.wait()  # Wait until server exits
-
-            if STOP_FLAG.exists():
-                logger.logMessage("Server stopped cleanly, monitor exiting.")
-                break
-
-            logger.logMessage(f"Server exited, restarting in {RESTART_DELAY}s...")
-            time.sleep(RESTART_DELAY)
-
-        except KeyboardInterrupt:
-            print("\n\nMonitoring stopped by user.")
-            break
+    finally:
+        MONITOR_PID_FILE.unlink(missing_ok=True)
 
 
 def tail_log(file_path: Path, n: int = 20):
