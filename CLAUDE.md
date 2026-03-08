@@ -1,0 +1,73 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Service Overview
+
+`news-getter` is a FastAPI news aggregator service (port 9000) that fetches and scores news sentiment per ticker using NLP models. It uses APScheduler to run background aggregation tasks and exposes a REST API for on-demand sentiment retrieval.
+
+This service is part of a larger monorepo — see the parent `CLAUDE.md` at `../CLAUDE.md` for full architecture context.
+
+## Setup & Running
+
+```bash
+cd news-getter
+uv sync   # creates .venv, resolves deps from pyproject.toml
+```
+
+```bash
+python main.py --mode start-server  # start uvicorn once
+python main.py --mode monitor       # monitor loop (auto-restart on crash)
+python main.py --mode stop          # stop server via PID
+python main.py --mode check         # check if server is running
+python main.py --mode stats         # interactive SQL query runner (analytics/sql/*.sql)
+python main.py --mode logs          # tail last N lines of log
+python main.py                      # interactive menu
+```
+
+Process files:
+- PID: `news_server.pid`
+- Monitor PID: `news_monitor.pid`
+- Stop flag: `news_server.stop`
+- Log: `news_server.log`
+
+## Architecture
+
+### Entry Points
+
+- `news_server.py` — FastAPI app (`news_server:app`), uvicorn target. Manages APScheduler lifecycle via `@asynccontextmanager lifespan`.
+- `main.py` — CLI wrapper that spawns uvicorn as a subprocess and implements the monitor loop.
+- `api.py` — REST API route definitions.
+
+### Services
+
+- `services/news_aggregator.py` — `aggregate_headlines_smart()`: fetches RSS/API headlines, deduplicates, and scores sentiment.
+- `services/processor.py` — batch processing of headline sentiment.
+- `services/core/cache_manager.py` — `RateLimitCache` and `HeadlineCache` for deduplication and rate-limit management.
+- `services/core/deps.py` — FastAPI dependency injection helpers.
+
+### Database
+
+SQLAlchemy-managed SQLite database in `database/`. Models in `models/models.py` include:
+- `SymbolSentiment` — aggregated sentiment score per ticker
+- `NewsArticle` — individual article records
+- `TickerSentiment` — per-ticker sentiment timeseries
+
+### Background Scheduling
+
+APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler config is exposed via the REST API (`SchedulerConfig` model).
+
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `news_server.py` | FastAPI app with APScheduler lifecycle |
+| `api.py` | REST API endpoints |
+| `services/news_aggregator.py` | Headline fetch + sentiment scoring |
+| `services/core/cache_manager.py` | Rate-limit + headline deduplication cache |
+| `database/database.py` | SQLAlchemy engine, session, and `init_database()` |
+| `models/models.py` | Pydantic/SQLAlchemy data models |
+
+## Environment Variables
+
+Loaded from `.env` at startup via `python-dotenv`. API keys for news sources should be set there.
