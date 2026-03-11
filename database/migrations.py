@@ -68,8 +68,9 @@ def run_migrations(db_path: str):
     """Apply all pending news-getter schema migrations. Safe to call on every startup."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"""
