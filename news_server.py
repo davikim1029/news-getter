@@ -512,7 +512,7 @@ async def save_tickers_to_db(db: Session = None):
         db = SessionLocal()
     try:
         ticker_dict = fetch_us_tickers_from_finnhub(None)
-        for symbol, name in ticker_dict.items():
+        for symbol, meta in ticker_dict.items():
             existing = db.execute(
                 text("SELECT 1 FROM tickers WHERE symbol = :symbol"),
                 {"symbol": symbol},
@@ -525,7 +525,7 @@ async def save_tickers_to_db(db: Session = None):
                     ),
                     {
                         "symbol": symbol,
-                        "name": name,
+                        "name": meta.get("name"),
                         "timestamp": datetime.now(timezone.utc),
                     },
                 )
