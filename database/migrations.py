@@ -81,12 +81,15 @@ def run_migrations(db_path: str):
         """)
         conn.commit()
 
-        applied = {row[0] for row in conn.execute(f"SELECT version FROM {_MIGRATION_TABLE}")}
         for version, fn in _MIGRATIONS:
-            if version in applied:
-                continue
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                # Check applied INSIDE the transaction so concurrent processes
+                # cannot both read an empty set and race to insert the same version.
+                applied = {row[0] for row in conn.execute(f"SELECT version FROM {_MIGRATION_TABLE}")}
+                if version in applied:
+                    conn.rollback()
+                    continue
                 fn(conn)
                 conn.execute(
                     f"INSERT INTO {_MIGRATION_TABLE} (version, applied_at) VALUES (?, ?)",
