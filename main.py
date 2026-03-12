@@ -15,9 +15,7 @@ import psutil
 from datetime import datetime
 import argparse
 from collections import deque
-from shared_options.log.logger_singleton import getLogger
-
-logger = getLogger()
+logger = None
 
 # -----------------------------
 # Paths & Constants
@@ -43,6 +41,14 @@ RESTART_DELAY = 2  # seconds before auto-restart if crashed
 HEARTBEAT = 600  # 10 minutes between health checks
 
 server_start_time = None
+
+
+def _init_logger():
+    global logger
+    if logger is not None:
+        return
+    from shared_options.log.logger_singleton import getLogger
+    logger = getLogger()
 
 # -----------------------------
 # Helper Functions
@@ -334,7 +340,7 @@ def stats():
     if not is_server_running():
         print("Server is not running.")
         return
-    
+
     try:
         import requests
         response = requests.get(f"http://localhost:{PORT}/stats", timeout=5)
@@ -396,9 +402,8 @@ def get_mode_from_prompt():
         
         print("Invalid choice, try again.")
 
-import requests, time
-
 def wait_for_server(port=PORT, timeout=600):
+    import requests
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -422,7 +427,13 @@ def main():
     
     while True:
         mode = args.mode.lower() if args.mode else get_mode_from_prompt()
-        
+
+        if mode == "quit":
+            print("Goodbye!")
+            break
+
+        _init_logger()
+
         if mode == "start-server":
             start_server()
 
@@ -441,10 +452,6 @@ def main():
             
         elif mode == "logs":
             tail_log(LOG_FILE, args.lines)
-            
-        elif mode == "quit":
-            print("Goodbye!")
-            break
             
         else:
             print(f"Unknown mode: {mode}")
