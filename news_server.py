@@ -41,6 +41,7 @@ from services.news_aggregator import (
 )
 from services.core.cache_manager import RateLimitCache, HeadlineCache
 from shared_options.log.logger_singleton import getLogger
+from shared_options.services.monitor_status import MonitorStatus
 
 logger = getLogger()
 
@@ -329,10 +330,23 @@ async def process_all_tickers():
         logger.logMessage("[Scheduler] No symbols to process")
         return
 
+    ms = MonitorStatus.instance()
+    total = len(unique_symbols)
+    num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    with ms._lock:
+        cycles = ms._data["counters"].get("Cycles", 0) + 1
+        total_processed_so_far = ms._data["counters"].get("Tickers Processed", 0)
+        ms._data["counters"]["Cycles"] = cycles
+    ms.set_progress(0, total, "tickers")
+    ms.set_step(f"Processing {total} tickers in {num_batches} batch(es)")
+
     app_state.is_processing = True
+    done = 0
     try:
-        for i in range(0, len(unique_symbols), BATCH_SIZE):
+        for i in range(0, total, BATCH_SIZE):
             batch = unique_symbols[i : i + BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
+            ms.set_step(f"Batch {batch_num}/{num_batches} — {batch[0]}..{batch[-1]}")
 
             tasks = [
                 process_single_ticker(symbol, symbol_map.get(symbol))
@@ -340,10 +354,16 @@ async def process_all_tickers():
             ]
 
             await asyncio.gather(*tasks, return_exceptions=True)
+            done += len(batch)
+            ms.set_progress(done, total, "tickers")
+            ms.set_counter("Tickers Processed", total_processed_so_far + done)
             await asyncio.sleep(0.1)
 
     finally:
         app_state.is_processing = False
+        ms.set_progress(done, total, "tickers")
+        ms.set_step("Idle — waiting for next cycle")
+        ms.set_last_event(f"Completed {done}/{total} tickers")
 
 
 DB_CONCURRENCY_LIMIT = 4
@@ -565,7 +585,9 @@ async def lifespan(app: FastAPI):
     # Startup
     from dotenv import load_dotenv
     load_dotenv()  # reads .env into os.environ
-    
+
+    ms = MonitorStatus.instance("news-getter")
+    ms.set_step("Starting up")
     logger.logMessage("[App] Starting up...")
     
     # Initialize database (create tables if needed)
@@ -578,10 +600,12 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(_load_transformer_pipeline)
     
     await start_scheduler()
-    
+    ms.set_step("Idle — waiting for next cycle")
+
     yield
-    
+
     # Shutdown
+    ms.set_step("Shutting down")
     logger.logMessage("[App] Shutting down...")
     await stop_scheduler()
         
