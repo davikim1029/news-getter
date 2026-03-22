@@ -882,6 +882,49 @@ async def get_symbol_articles(
     }
 
 
+@app.get("/sentiment/aggregate")
+async def get_aggregate_sentiment(
+    tickers: Optional[str] = Query(
+        None,
+        description="Comma-separated ticker list. Omit for market-wide average."
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the average sentiment score across a set of tickers.
+
+    - No `tickers` param → market-wide average of all tracked symbols.
+    - `tickers=AAPL,MSFT,...` → average only for those symbols.
+
+    Only includes symbols that have a recorded sentiment score.
+    Returns 0.0 with ticker_count=0 when no data is available.
+    """
+    from sqlalchemy import func
+
+    query = db.query(
+        func.avg(SymbolSentiment.sentiment_score).label("avg_score"),
+        func.count(SymbolSentiment.id).label("cnt"),
+    )
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        if ticker_list:
+            query = query.filter(SymbolSentiment.symbol.in_(ticker_list))
+
+    row = query.one()
+    avg_score = float(row.avg_score) if row.avg_score is not None else 0.0
+    ticker_count = int(row.cnt) if row.cnt else 0
+
+    scope = "market" if not tickers else f"custom({ticker_count} symbols)"
+
+    return {
+        "scope": scope,
+        "sentiment_score": avg_score,
+        "ticker_count": ticker_count,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.delete("/articles/cleanup")
 async def cleanup_stale_articles(
     days: int = 30,
