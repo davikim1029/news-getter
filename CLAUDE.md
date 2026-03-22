@@ -57,11 +57,18 @@ SQLAlchemy-managed SQLite database in `database/`. Models in `models/models.py` 
 
 APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler config is exposed via the REST API (`SchedulerConfig` model).
 
+## Key Endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `GET /sentiment/{ticker}` | GET | Per-ticker sentiment score |
+| `GET /sentiment/aggregate` | GET | Aggregate sentiment across tickers. Optional `?tickers=AAPL,MSFT` to scope to specific tickers. Returns `{scope, sentiment_score, ticker_count, computed_at}`. No DB writes — pure aggregation from `SymbolSentiment`. Used by `option-getter` to prefetch market-wide and sector-level sentiment once per scan cycle. |
+
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `news_server.py` | FastAPI app with APScheduler lifecycle |
+| `news_server.py` | FastAPI app with APScheduler lifecycle + `GET /sentiment/aggregate` endpoint |
 | `api.py` | REST API endpoints |
 | `services/news_aggregator.py` | Headline fetch + sentiment scoring |
 | `services/core/cache_manager.py` | Rate-limit + headline deduplication cache |
