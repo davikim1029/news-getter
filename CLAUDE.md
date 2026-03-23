@@ -78,3 +78,12 @@ APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler 
 ## Environment Variables
 
 Loaded from `.env` at startup via `python-dotenv`. API keys for news sources should be set there.
+
+## Git Commit Policy
+
+**Never create a git commit without explicit user confirmation.** Before every commit:
+1. Show the proposed file list and commit message
+2. Ask the user to confirm and provide or approve the message
+3. Only proceed after explicit approval
+
+This applies across all repos in this monorepo.
