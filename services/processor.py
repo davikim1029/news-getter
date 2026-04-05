@@ -119,53 +119,58 @@ async def aggregate_and_store_ticker(
 async def store_articles(symbol: str, headlines: List[Headline], db: Session) -> int:
     """
     Store individual articles in the news_articles table.
-    - Prevents duplicates based on URL
+    - Prevents duplicates based on URL (single bulk query, not per-headline)
     - Removes stale articles (older than 30 days)
     - Returns count of newly stored articles
     """
     try:
-        stored_count = 0
-        
-        # Clean up stale articles first (older than 30 days)
-        from datetime import timedelta
-        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        from datetime import timedelta, timezone
+        now = datetime.now(timezone.utc)
+        cutoff_date = now - timedelta(days=30)
+
         deleted = db.query(NewsArticle).filter(
             NewsArticle.symbol == symbol,
             NewsArticle.fetched_at < cutoff_date
         ).delete()
-        
+
         if deleted > 0:
             logger.logMessage(f"[DB] Removed {deleted} stale articles for {symbol}")
-        
-        # Store new articles
+
+        # Bulk-fetch existing URLs — one query instead of N
+        incoming_urls = {h.url for h in headlines if h.url}
+        existing_urls: set = set()
+        if incoming_urls:
+            existing_urls = {
+                row.url
+                for row in db.query(NewsArticle.url)
+                .filter(NewsArticle.url.in_(incoming_urls))
+                .all()
+            }
+            stale_urls = incoming_urls & existing_urls
+            if stale_urls:
+                db.query(NewsArticle).filter(
+                    NewsArticle.url.in_(stale_urls)
+                ).update({"fetched_at": now}, synchronize_session=False)
+
+        stored_count = 0
         for h in headlines:
-            # Check if article already exists (by URL)
-            if h.url:
-                existing = db.query(NewsArticle).filter(
-                    NewsArticle.url == h.url
-                ).first()
-                
-                if existing:
-                    # Update fetched_at to keep it fresh
-                    existing.fetched_at = datetime.utcnow()
-                    continue
-            
-            # Create new article
-            article = NewsArticle(
+            if h.url and h.url in existing_urls:
+                continue
+
+            db.add(NewsArticle(
                 symbol=symbol,
                 source=h.source or "unknown",
                 title=h.title or "",
                 description=h.description,
                 url=h.url,
                 published_at=h.published_at,
-                fetched_at=datetime.utcnow()
-            )
-            db.add(article)
+                fetched_at=now,
+            ))
             stored_count += 1
-        
+
         db.commit()
         return stored_count
-        
+
     except Exception as e:
         logger.logMessage(f"[DB] Error storing articles for {symbol}: {e}")
         db.rollback()

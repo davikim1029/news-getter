@@ -37,7 +37,8 @@ import json
 # Import your existing news aggregator
 from services.news_aggregator import (
     aggregate_headlines_smart,
-    Headline
+    compute_headlines_sentiment,
+    Headline,
 )
 from services.core.cache_manager import RateLimitCache, HeadlineCache
 from shared_options.log.logger_singleton import getLogger
@@ -134,7 +135,8 @@ async def aggregate_and_store_ticker(
         with db_session() as db:
             from datetime import timedelta
 
-            cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+            now = datetime.now(timezone.utc)
+            cutoff_date = now - timedelta(days=30)
 
             deleted = (
                 db.query(NewsArticle)
@@ -148,17 +150,27 @@ async def aggregate_and_store_ticker(
             if deleted:
                 logger.logMessage(f"[DB] Removed {deleted} stale articles for {ticker}")
 
+            # Bulk-fetch all existing URLs for this ticker — one query instead of N
+            incoming_urls = {h.url for h in headlines if h.url}
+            existing_urls: set[str] = set()
+            if incoming_urls:
+                existing_urls = {
+                    row.url
+                    for row in db.query(NewsArticle.url)
+                    .filter(NewsArticle.url.in_(incoming_urls))
+                    .all()
+                }
+                # Touch fetched_at for duplicates in one update
+                stale_urls = incoming_urls & existing_urls
+                if stale_urls:
+                    db.query(NewsArticle).filter(
+                        NewsArticle.url.in_(stale_urls)
+                    ).update({"fetched_at": now}, synchronize_session=False)
+
             articles_data = []
             for h in headlines:
-                if h.url:
-                    existing = (
-                        db.query(NewsArticle)
-                        .filter(NewsArticle.url == h.url)
-                        .first()
-                    )
-                    if existing:
-                        existing.fetched_at = datetime.now(timezone.utc)
-                        continue
+                if h.url and h.url in existing_urls:
+                    continue
 
                 article = NewsArticle(
                     symbol=ticker,
@@ -167,7 +179,7 @@ async def aggregate_and_store_ticker(
                     description=h.description,
                     url=h.url,
                     published_at=h.published_at if h.published_at else None,
-                    fetched_at=datetime.now(timezone.utc),
+                    fetched_at=now,
                 )
                 db.add(article)
 
@@ -184,7 +196,7 @@ async def aggregate_and_store_ticker(
                             if h.published_at
                             else None
                         ),
-                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "fetched_at": now.isoformat(),
                     }
                 )
 
@@ -193,7 +205,6 @@ async def aggregate_and_store_ticker(
         # ============================
         # 4. Compute sentiment (NON-DB)
         # ============================
-        from services.news_aggregator import compute_headlines_sentiment
         sentiment_score = await asyncio.to_thread(
             compute_headlines_sentiment, headlines
         )
@@ -252,62 +263,6 @@ async def aggregate_and_store_ticker(
     except Exception as e:
         logger.logMessage(f"[API] Fatal error for {ticker}: {e}")
         raise
-
-
-async def store_articles(symbol: str, headlines: List[Headline], db: Session) -> int:
-    """
-    Store individual articles in the news_articles table.
-    - Prevents duplicates based on URL
-    - Removes stale articles (older than 30 days)
-    - Returns count of newly stored articles
-    """
-    try:
-        stored_count = 0
-        
-        # Clean up stale articles first (older than 30 days)
-        from datetime import timedelta
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
-        deleted = db.query(NewsArticle).filter(
-            NewsArticle.symbol == symbol,
-            NewsArticle.fetched_at < cutoff_date
-        ).delete()
-        
-        if deleted > 0:
-            logger.logMessage(f"[DB] Removed {deleted} stale articles for {symbol}")
-        
-        # Store new articles
-        for h in headlines:
-            # Check if article already exists (by URL)
-            if h.url:
-                existing = db.query(NewsArticle).filter(
-                    NewsArticle.url == h.url
-                ).first()
-                
-                if existing:
-                    # Update fetched_at to keep it fresh
-                    existing.fetched_at = datetime.now(timezone.utc)
-                    continue
-            
-            # Create new article
-            article = NewsArticle(
-                symbol=symbol,
-                source=h.source or "unknown",
-                title=h.title or "",
-                description=h.description,
-                url=h.url,
-                published_at=h.published_at if h.published_at else None,
-                fetched_at=datetime.now(timezone.utc)
-            )
-            db.add(article)
-            stored_count += 1
-        
-        db.commit()
-        return stored_count
-        
-    except Exception as e:
-        logger.logMessage(f"[DB] Error storing articles for {symbol}: {e}")
-        db.rollback()
-        return 0
 
 
 import asyncio
@@ -532,25 +487,28 @@ async def save_tickers_to_db(db: Session = None):
         db = SessionLocal()
     try:
         ticker_dict = fetch_us_tickers_from_finnhub(None)
-        for symbol, meta in ticker_dict.items():
-            existing = db.execute(
-                text("SELECT 1 FROM tickers WHERE symbol = :symbol"),
-                {"symbol": symbol},
-            ).fetchone()
-            if not existing:
-                db.execute(
-                    text(
-                        "INSERT INTO tickers (symbol, name, timestamp) "
-                        "VALUES (:symbol, :name, :timestamp)"
-                    ),
-                    {
-                        "symbol": symbol,
-                        "name": meta.get("name"),
-                        "timestamp": datetime.now(timezone.utc),
-                    },
-                )
+        # Bulk-fetch all existing symbols in one query
+        existing_symbols = {
+            row[0]
+            for row in db.execute(text("SELECT symbol FROM tickers")).fetchall()
+        }
+        new_symbols = {sym: meta for sym, meta in ticker_dict.items() if sym not in existing_symbols}
+        if new_symbols:
+            now = datetime.now(timezone.utc)
+            db.execute(
+                text(
+                    "INSERT INTO tickers (symbol, name, timestamp) "
+                    "VALUES (:symbol, :name, :timestamp)"
+                ),
+                [
+                    {"symbol": sym, "name": meta.get("name"), "timestamp": now}
+                    for sym, meta in new_symbols.items()
+                ],
+            )
         db.commit()
-        logger.logMessage(f"[Tickers] Saved {len(ticker_dict)} US tickers to database")
+        logger.logMessage(
+            f"[Tickers] {len(new_symbols)} new tickers inserted ({len(ticker_dict)} fetched)"
+        )
     except Exception as e:
         logger.logMessage(f"[Tickers] Error saving tickers: {e}")
         db.rollback()
@@ -594,7 +552,7 @@ async def lifespan(app: FastAPI):
     init_database()
     
     # Warm up transformer model if enabled
-    if True or os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
+    if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
         await asyncio.to_thread(_load_transformer_pipeline)

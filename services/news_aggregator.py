@@ -17,13 +17,13 @@ Design:
 
 from dataclasses import dataclass
 from typing import List, Optional
+from datetime import datetime, timezone
 import os
 import requests
 import feedparser
 import math
 import re
 from html import unescape
-import re
 from shared_options.log.logger_singleton import getLogger
 from services.core.cache_manager import RateLimitCache,HeadlineCache
 from services.utils import is_rate_limited
@@ -307,8 +307,8 @@ SOURCE_WEIGHTS = {
     "business-insider": 0.9, "yahoo-news": 0.8, "google": 0.9, "default": 1.0
 }
 
-# Optional transformer support — disable by default to avoid heavy deps
-USE_TRANSFORMERS = True
+# Optional transformer support — controlled via USE_TRANSFORMERS env var (default false)
+USE_TRANSFORMERS = os.getenv("USE_TRANSFORMERS", "false").lower() == "true"
 _transformer_pipeline = None
 
 
@@ -358,8 +358,8 @@ def _load_transformer_pipeline():
             model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
                 torch_dtype=torch.float32,
-                low_cpu_mem_usage=False,
-                device_map=None,           
+                low_cpu_mem_usage=True,
+                device_map=None,
             )
 
             model.eval()
@@ -450,7 +450,6 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
             rec_w = 1.0
             if h.published_at:
                 try:
-                    from datetime import datetime, timezone
                     pub = datetime.fromisoformat(h.published_at.replace("Z", "+00:00"))
                     age_days = max(0.0, (datetime.now(timezone.utc) - pub).days)
                     rec_w = math.exp(-age_days / 3.0)
@@ -498,9 +497,6 @@ def get_sentiment_signal(ticker: str, ticker_name: str = "", rate_cache: RateLim
 
 def clean_description(html_text: str) -> str:
     """Remove HTML tags, decode entities, and normalize whitespace."""
-    import re
-    from html import unescape
-
     if not html_text:
         return ""
 
