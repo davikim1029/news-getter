@@ -30,6 +30,8 @@ from services.utils import is_rate_limited
 
 logger = getLogger()
 
+_http_session = requests.Session()
+
 class RateLimitedException(Exception):
     """Raised when the news aggregator is rate limited"""
     pass
@@ -121,7 +123,7 @@ class NewsAPIClient(NewsClientBase):
             "apiKey": self.api_key
         }
         try:
-            resp = requests.get(url, params=params)
+            resp = _http_session.get(url, params=params)
             if resp.status_code == 429:
                 self.logger.logMessage("[NewsAPI] Rate limited (429)")
                 if self.rate_cache is not None:
@@ -176,7 +178,7 @@ class NewsDataClient(NewsClientBase):
 
         }
         try:
-            resp = requests.get(url, params=params)
+            resp = _http_session.get(url, params=params)
             if resp.status_code == 429:
                 self.logger.logMessage("[NewsData] Rate limited (429)")
                 if self.rate_cache is not None:

@@ -136,7 +136,7 @@ async def aggregate_and_store_ticker(
             from datetime import timedelta
 
             now = datetime.now(timezone.utc)
-            cutoff_date = now - timedelta(days=30)
+            cutoff_date = now - timedelta(days=1)
 
             deleted = (
                 db.query(NewsArticle)
@@ -445,6 +445,12 @@ def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict
 # ===========================
 # Scheduler Setup
 # ===========================
+async def _evict_caches():
+    if app_state.rate_cache:
+        n = app_state.rate_cache.evict_expired()
+        if n:
+            logger.logMessage(f"[Cache] Evicted {n} expired rate-limit entries")
+
 async def start_scheduler():
     """Initialize and start the background scheduler"""
     app_state.scheduler = AsyncIOScheduler()
@@ -473,7 +479,16 @@ async def start_scheduler():
         replace_existing=True,
         kwargs={"job_func": save_tickers_to_db}
     )
-        
+
+    app_state.scheduler.add_job(
+        job_wrapper,
+        trigger=IntervalTrigger(minutes=30),
+        id="cache_eviction",
+        name="Evict expired in-memory cache entries",
+        replace_existing=True,
+        kwargs={"job_func": _evict_caches}
+    )
+
     app_state.scheduler.start()
     logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
     
@@ -885,7 +900,7 @@ async def get_aggregate_sentiment(
 
 @app.delete("/articles/cleanup")
 async def cleanup_stale_articles(
-    days: int = 30,
+    days: int = 1,
     db: Session = Depends(get_db)
 ):
     """Remove articles older than specified days"""

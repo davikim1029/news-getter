@@ -155,6 +155,13 @@ class CacheManager:
             if item:
                 del self._cache[key]
 
+    def evict_expired(self) -> int:
+        with self._lock:
+            expired = [k for k, v in self._cache.items() if self.is_expired(v["Timestamp"])]
+            for k in expired:
+                del self._cache[k]
+        return len(expired)
+
     def clear(self):
         with self._lock:
             self._cache.clear()

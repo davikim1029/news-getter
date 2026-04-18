@@ -303,7 +303,14 @@ def monitor_loop():
                     _proc[0] = process
                     PID_FILE.write_text(str(process.pid))
                     print(f"Restarted with PID {process.pid}")
-                    process.wait()  # Wait until server exits
+                    while process.poll() is None:
+                        if STOP_FLAG.exists():
+                            try:
+                                os.killpg(process.pid, signal.SIGTERM)
+                            except Exception:
+                                pass
+                            break
+                        time.sleep(5)
                     _proc[0] = None
 
                 if STOP_FLAG.exists():
