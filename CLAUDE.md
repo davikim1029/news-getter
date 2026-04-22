@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Cross-Service API Reference
+
+Before writing any code that calls another service, **read that service's `docs/API.md` first**. Each service maintains an API reference documenting every owned endpoint and every external call it makes.
+
+| Service | Port | API Docs |
+|---|---|---|
+| option-file-server | 8000 | [../option-file-server/docs/API.md](../option-file-server/docs/API.md) |
+| **news-getter** (this service) | 9000 | [docs/API.md](docs/API.md) |
+| options-ai | 8100 | [../options-ai/docs/API.md](../options-ai/docs/API.md) |
+| option-getter | 8001 | [../option-getter/docs/API.md](../option-getter/docs/API.md) |
+| option-analysis | 9200 | [../option-analysis/docs/API.md](../option-analysis/docs/API.md) |
+| process-monitor | 9100 | [../process-monitor/docs/API.md](../process-monitor/docs/API.md) |
+
+---
+
 ## Service Overview
 
 `news-getter` is a FastAPI news aggregator service (port 9000) that fetches and scores news sentiment per ticker using NLP models. It uses APScheduler to run background aggregation tasks and exposes a REST API for on-demand sentiment retrieval.
