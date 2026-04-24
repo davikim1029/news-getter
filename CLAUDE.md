@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Session Startup
+
+At the start of every Claude Code session, immediately run `/load-docs news-getter` as the first action before responding to any request.
+
 ## Cross-Service API Reference
 
 Before writing any code that calls another service, **read that service's `docs/API.md` first**. Each service maintains an API reference documenting every owned endpoint and every external call it makes.
