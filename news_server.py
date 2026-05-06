@@ -42,6 +42,7 @@ from services.news_aggregator import (
 )
 from services.core.cache_manager import RateLimitCache, HeadlineCache
 from shared_options.log.logger_singleton import getLogger
+from shared_options.log.logger import LogType
 from shared_options.services.monitor_status import MonitorStatus
 
 logger = getLogger()
@@ -85,7 +86,8 @@ async def aggregate_and_store_ticker(
                     age = datetime.now(timezone.utc) - last_updated
                     if age.total_seconds() < 3600:
                         logger.logMessage(
-                            f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)"
+                            f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)",
+                            log_type=LogType.Server,
                         )
 
                         articles = [
@@ -114,7 +116,7 @@ async def aggregate_and_store_ticker(
 
                         return sentiment_to_dict(existing, articles=articles, from_cache=True)
 
-        logger.logMessage(f"[API] Aggregating news for {ticker}")
+        logger.logMessage(f"[API] Aggregating news for {ticker}", log_type=LogType.Server)
 
         # ============================
         # 2. Fetch headlines (NON-DB)
@@ -249,19 +251,20 @@ async def aggregate_and_store_ticker(
 
         logger.logMessage(
             f"[API] {ticker}: sentiment={sentiment_score:.3f}, "
-            f"articles={len(headlines)}"
+            f"articles={len(headlines)}",
+            log_type=LogType.Server,
         )
 
         return sentiment_to_dict(record, articles=articles_data, from_cache=False)
 
     except RateLimitedException:
-        logger.logMessage(f"[API] Rate-limited for {ticker}")
+        logger.logMessage(f"[API] Rate-limited for {ticker}", log_type=LogType.Server)
         raise
     except AggregatorException:
-        logger.logMessage(f"[API] Aggregation failed for {ticker}")
+        logger.logMessage(f"[API] Aggregation failed for {ticker}", log_type=LogType.Server)
         raise
     except Exception as e:
-        logger.logMessage(f"[API] Fatal error for {ticker}: {e}")
+        logger.logMessage(f"[API] Fatal error for {ticker}: {e}", log_type=LogType.Server)
         raise
 
 
@@ -377,7 +380,7 @@ def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict
                     f,
                     indent=2
                 )
-            logger.logMessage(f"[Migration] Backup saved to {backup_file}")
+            logger.logMessage(f"[Migration] Backup saved to {backup_file}", log_type=LogType.Server)
         
         # Load JSON data
         with open(json_path, 'r') as f:
@@ -421,7 +424,7 @@ def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict
                 migrated += 1
                 
             except Exception as e:
-                logger.logMessage(f"[Migration] Error migrating {ticker}: {e}")
+                logger.logMessage(f"[Migration] Error migrating {ticker}: {e}", log_type=LogType.Server)
                 errors += 1
         
         db.commit()
@@ -433,11 +436,11 @@ def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict
             "total": len(data)
         }
         
-        logger.logMessage(f"[Migration] Complete: {result}")
+        logger.logMessage(f"[Migration] Complete: {result}", log_type=LogType.Server)
         return result
         
     except Exception as e:
-        logger.logMessage(f"[Migration] Failed: {e}")
+        logger.logMessage(f"[Migration] Failed: {e}", log_type=LogType.Server)
         db.rollback()
         raise
 
@@ -654,7 +657,7 @@ async def get_sentiment_score(
     # Construct Pydantic response
     response = SentimentResponse(**sentiment_data)
 
-    logger.logMessage(f"[API] Sentiment response for {symbol}: {response}")
+    logger.logMessage(f"[API] Sentiment response for {symbol}: {response}", log_type=LogType.Server)
     return response
 
 
