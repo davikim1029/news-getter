@@ -565,10 +565,10 @@ async def lifespan(app: FastAPI):
     ms = MonitorStatus.instance("news-getter")
     ms.set_step("Starting up")
     logger.logMessage("[App] Starting up...")
-    
+
     # Initialize database (create tables if needed)
     init_database()
-    
+
     # Warm up transformer model if enabled
     if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
