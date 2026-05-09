@@ -3,9 +3,10 @@
 
 set -euo pipefail
 
-SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="$(basename "$SERVICE_DIR")"
-SHARED_DIR="$SERVICE_DIR/../options-shared"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SERVICE_NAME="$(basename "$SERVICE_ROOT")"
+SHARED_DIR="$SERVICE_ROOT/../options-shared"
 
 echo ""
 echo "=== Setting up: $SERVICE_NAME ==="
@@ -36,7 +37,7 @@ echo "      Found at $SHARED_DIR"
 
 # --- Step 3: Install dependencies from lockfile ---
 echo "[3/3] Syncing dependencies (uv sync)..."
-cd "$SERVICE_DIR"
+cd "$SERVICE_ROOT"
 uv sync
 
 # --- Verify shared_options editable install ---

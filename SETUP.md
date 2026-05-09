@@ -5,8 +5,8 @@ This service uses [UV](https://docs.astral.sh/uv/) for dependency management.
 ## First-time setup on a new machine
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+
+bash scripts/setup/setup.sh
 ```
 
 The script will:
