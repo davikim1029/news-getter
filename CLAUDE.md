@@ -48,7 +48,7 @@ Process files:
 - PID: `news_server.pid`
 - Monitor PID: `news_monitor.pid`
 - Stop flag: `news_server.stop`
-- Log: `news_server.log`
+- Log: `logs/monitor/log.log` (rotated daily, 7-day retention)
 
 ## Architecture
 

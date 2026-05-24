@@ -26,7 +26,38 @@ STOP_FLAG = Path("news_server.stop")
 MONITOR_PID_FILE = Path("news_monitor.pid")
 APP_NAME = "news_server:app"
 APP_NAME_FRAGMENT = "news_server"
-LOG_FILE = Path("news_server.log")
+LOG_FILE = Path("logs/monitor/log.log")
+
+
+def _rotate_log(log_path: Path, max_days: int = 7) -> None:
+    """Rotate log_path if last modified on a previous calendar day.
+    Rotated files are named <log_path>.YYYY-MM-DD. Files older than
+    max_days are purged."""
+    if not log_path.exists():
+        return
+    try:
+        import time as _time
+        file_date = _time.strftime("%Y-%m-%d", _time.localtime(log_path.stat().st_mtime))
+        today = _time.strftime("%Y-%m-%d")
+        if file_date != today:
+            dest = log_path.parent / f"{log_path.name}.{file_date}"
+            try:
+                log_path.rename(dest)
+            except (FileNotFoundError, FileExistsError, OSError):
+                pass
+    except Exception:
+        pass
+    cutoff = __import__("time").time() - max_days * 86400
+    try:
+        for entry in log_path.parent.iterdir():
+            if entry.name.startswith(log_path.name + ".") and entry.is_file():
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 # uvicorn command to start FastAPI server
 UVICORN_CMD = [
@@ -163,6 +194,8 @@ def start_server():
 
     # Start the server
     print(f"Starting news aggregator server on port {PORT}...")
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log(LOG_FILE)
     with LOG_FILE.open("a") as log_file:
         process = subprocess.Popen(
             UVICORN_CMD,
@@ -293,6 +326,8 @@ def monitor_loop():
                 if PID_FILE.exists():
                     PID_FILE.unlink(missing_ok=True)
 
+                LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _rotate_log(LOG_FILE)
                 with LOG_FILE.open("a") as log_file:
                     process = subprocess.Popen(
                         UVICORN_CMD,
