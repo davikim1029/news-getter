@@ -560,7 +560,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     # Startup
     from dotenv import load_dotenv
-    load_dotenv()  # reads .env into os.environ
+    load_dotenv(override=True)  # reads .env into os.environ
 
     ms = MonitorStatus.instance("news-getter")
     ms.set_step("Starting up")
