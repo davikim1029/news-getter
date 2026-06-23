@@ -5,6 +5,11 @@ News Aggregator Server Manager
 Manages the FastAPI news aggregator service with start/stop/monitor capabilities.
 """
 
+try:
+    import readline  # noqa: F401 — gives input() arrow-key editing/history at a TTY
+except ImportError:
+    pass
+
 import sys
 import os
 import subprocess
