@@ -32,6 +32,26 @@ logger = getLogger()
 
 _http_session = requests.Session()
 
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+        if value <= 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        logger.logMessage(f"[NewsHTTP] Invalid {name}; using default {default}s")
+        return default
+
+
+HTTP_CONNECT_TIMEOUT_SECONDS = _float_env("NEWS_HTTP_CONNECT_TIMEOUT_SECONDS", 3.0)
+HTTP_READ_TIMEOUT_SECONDS = _float_env("NEWS_HTTP_READ_TIMEOUT_SECONDS", 10.0)
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT_SECONDS, HTTP_READ_TIMEOUT_SECONDS)
+HTTP_USER_AGENT = os.getenv(
+    "NEWS_HTTP_USER_AGENT",
+    "options-news-getter/1.0 (+https://github.com/daviskim/options)"
+)
+
 class RateLimitedException(Exception):
     """Raised when the news aggregator is rate limited"""
     pass
@@ -123,7 +143,12 @@ class NewsAPIClient(NewsClientBase):
             "apiKey": self.api_key
         }
         try:
-            resp = _http_session.get(url, params=params)
+            resp = _http_session.get(
+                url,
+                params=params,
+                timeout=HTTP_TIMEOUT,
+                headers={"User-Agent": HTTP_USER_AGENT},
+            )
             if resp.status_code == 429:
                 self.logger.logMessage("[NewsAPI] Rate limited (429)")
                 if self.rate_cache is not None:
@@ -178,7 +203,12 @@ class NewsDataClient(NewsClientBase):
 
         }
         try:
-            resp = _http_session.get(url, params=params)
+            resp = _http_session.get(
+                url,
+                params=params,
+                timeout=HTTP_TIMEOUT,
+                headers={"User-Agent": HTTP_USER_AGENT},
+            )
             if resp.status_code == 429:
                 self.logger.logMessage("[NewsData] Rate limited (429)")
                 if self.rate_cache is not None:
@@ -210,11 +240,26 @@ class GoogleNewsClient(NewsClientBase):
         return f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
     def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
+        if self.rate_cache is not None and is_rate_limited(self.rate_cache, "GoogleNews"):
+            return []
+
         query = ticker_name or ticker
         keywords = [query, "stock", "finance"]
         url = self._build_query_url(keywords)
         try:
-            feed = feedparser.parse(url)
+            resp = _http_session.get(
+                url,
+                timeout=HTTP_TIMEOUT,
+                headers={"User-Agent": HTTP_USER_AGENT},
+            )
+            if resp.status_code == 429:
+                self.logger.logMessage("[GoogleNews] Rate limited (429)")
+                if self.rate_cache is not None:
+                    self.rate_cache.add("GoogleNews", 3600)
+                return None
+            resp.raise_for_status()
+
+            feed = feedparser.parse(resp.content)
             out = []
             for entry in feed.entries:
                 out.append(Headline(
