@@ -8,7 +8,7 @@ Features:
 3. REST API for on-demand news retrieval
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query
 from typing import Optional, List, Dict, Any
 from dateutil.parser import parse as parse_datetime
 from datetime import datetime, timezone
@@ -28,7 +28,13 @@ from models.models import (
     TickerSentiment,
     sentiment_to_dict
 )
-from database.database import (engine, SessionLocal, init_database, get_db)
+from database.database import (
+    SessionLocal,
+    count_option_symbols,
+    init_database,
+    get_db,
+    list_option_symbols,
+)
 from sqlalchemy.orm import sessionmaker, Session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -44,10 +50,45 @@ from services.core.cache_manager import RateLimitCache, HeadlineCache
 from shared_options.log.logger_singleton import getLogger
 from shared_options.log.logger import LogType
 from shared_options.services.monitor_status import MonitorStatus
+from shared_options.services.key_auth import (
+    accepted_secrets,
+    is_one_of,
+    register_env_path,
+)
 
 logger = getLogger()
 
 app_state = AppState()
+
+
+def _is_production() -> bool:
+    return os.getenv("APP_ENV", os.getenv("ENV", "development")).strip().lower() in {
+        "prod",
+        "production",
+    }
+
+
+def _accepted_admin_keys() -> list[str]:
+    keys = accepted_secrets("NEWS_ADMIN_API_KEY")
+    if not keys:
+        keys = accepted_secrets("ANALYSIS_API_KEY")
+    return keys
+
+
+def _require_admin_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    accepted = _accepted_admin_keys()
+    if not accepted:
+        # Preserve dev-mode behavior unless APP_ENV=production.
+        return
+    if not is_one_of(x_api_key, accepted):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
+def _require_production_auth_config() -> None:
+    if _is_production() and not _accepted_admin_keys():
+        raise RuntimeError(
+            "Production news-getter requires NEWS_ADMIN_API_KEY or ANALYSIS_API_KEY"
+        )
 
 
 # ===========================
@@ -280,9 +321,8 @@ async def process_all_tickers():
 
     with db_session() as db:
         symbol_map = load_symbol_map(db)
-        symbols = db.query(OptionLifetime.symbol).distinct().all()
 
-    unique_symbols = [s[0] for s in symbols if s[0]]
+    unique_symbols = list_option_symbols()
 
     if not unique_symbols:
         logger.logMessage("[Scheduler] No symbols to process")
@@ -561,6 +601,8 @@ async def lifespan(app: FastAPI):
     # Startup
     from dotenv import load_dotenv
     load_dotenv(override=True)  # reads .env into os.environ
+    register_env_path(os.path.join(os.path.dirname(__file__), ".env"))
+    _require_production_auth_config()
 
     ms = MonitorStatus.instance("news-getter")
     ms.set_step("Starting up")
@@ -664,7 +706,8 @@ async def get_sentiment_score(
 @app.post("/migrate")
 async def migrate_json_data(
     request: MigrationRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(_require_admin_key),
 ):
     """
     Migrate existing JSON news data to database.
@@ -696,13 +739,13 @@ async def migrate_json_data(
 @app.post("/scheduler/trigger")
 async def trigger_batch_processing(
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    _: None = Depends(_require_admin_key),
 ):
     """Manually trigger batch processing of all tickers"""
     if app_state.is_processing:
         return {"status": "already_running", "message": "Batch processing already in progress"}
     
-    background_tasks.add_task(process_all_tickers, db)
+    background_tasks.add_task(process_all_tickers)
     return {"status": "triggered", "message": "Batch processing started"}
 
 
@@ -728,7 +771,10 @@ async def get_scheduler_status():
 
 
 @app.post("/scheduler/configure")
-async def configure_scheduler(config: SchedulerConfig):
+async def configure_scheduler(
+    config: SchedulerConfig,
+    _: None = Depends(_require_admin_key),
+):
     """Update scheduler configuration"""
     if not app_state.scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
@@ -750,7 +796,6 @@ async def configure_scheduler(config: SchedulerConfig):
                 id="news_aggregation",
                 name="Aggregate news for all tickers",
                 replace_existing=True,
-                kwargs={"db": SessionLocal()}
             )
         message = f"Scheduler configured: {config.interval_minutes}min interval"
     else:
@@ -774,9 +819,7 @@ async def get_statistics(db: Session = Depends(get_db)):
         SymbolSentiment.last_updated.desc()
     ).limit(10).all()
     
-    # Get unique symbols from option_lifetimes
-    from sqlalchemy import distinct
-    total_option_symbols = db.query(func.count(distinct(OptionLifetime.symbol))).scalar()
+    total_option_symbols = count_option_symbols()
     
     return {
         "total_symbols_tracked": total_symbols,
@@ -801,11 +844,8 @@ async def list_symbols(
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """List all symbols from option_lifetimes table"""
-    from sqlalchemy import distinct
-    
-    symbols = db.query(distinct(OptionLifetime.symbol)).offset(skip).limit(limit).all()
-    symbol_list = [s[0] for s in symbols if s[0]]
+    """List all symbols from option-file-server's option_lifetimes table."""
+    symbol_list = list_option_symbols(skip=skip, limit=limit)
     
     return {
         "symbols": symbol_list,
@@ -904,7 +944,8 @@ async def get_aggregate_sentiment(
 @app.delete("/articles/cleanup")
 async def cleanup_stale_articles(
     days: int = 1,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(_require_admin_key),
 ):
     """Remove articles older than specified days"""
     from datetime import timedelta
