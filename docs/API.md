@@ -1,211 +1,41 @@
 # API Reference — news-getter (port 9000)
 
-> Before calling any endpoint here, verify the path against this file.
-> Auth: No authentication required on any endpoint (internal network only).
+Implementation source of truth: `news_server.py` (`news_server:app`). FastAPI also exposes generated OpenAPI at `/openapi.json` and Swagger UI at `/docs` while the service is running.
 
----
+**Authentication:** read endpoints remain public on the trusted service network. Administrative and destructive operations require `X-API-Key` matching `NEWS_ADMIN_API_KEY` (or `ANALYSIS_API_KEY` as a compatibility fallback). Production mode (`APP_ENV=production`) refuses to start unless one of those keys is configured.
 
-## Owned Endpoints
+**Storage:** news-owned tables live in `database/news.db` by default (`NEWS_DB_PATH` override). `/symbols` and the option-symbol count in `/stats` read `option-file-server/database/options.db` through a read-only connection (`NEWS_OPTIONS_DB_PATH` override). Startup can copy legacy news rows from the old shared DB when the new DB is empty; disable with `NEWS_IMPORT_LEGACY_ON_INIT=false`.
 
-### GET /
-- **File:** `news_server.py:602`
-- **Auth:** None
-- **Purpose:** Health check and scheduler status.
-- **Input:** None
-- **Example output:**
-  ```json
-  {
-    "status": "running",
-    "service": "News Aggregator API",
-    "scheduler_running": true,
-    "is_processing": false
-  }
-  ```
+## Owned endpoints
 
----
+| Method and path | Inputs | Response / behavior |
+|---|---|---|
+| `GET /` | None | Health summary: `status`, `service`, `scheduler_running`, `is_processing`. |
+| `POST /sentiment/{symbol}/score` | Path `symbol`; query `include_articles=false`, `force_refresh=false` | Returns `SentimentResponse`. Uses a DB record less than one hour old unless refresh is forced; otherwise fetches news, stores articles, computes sentiment, and upserts the symbol aggregate. Upstream rate limiting maps to 429; aggregation failures map to 502. |
+| `GET /sentiment/aggregate` | Optional comma-separated query `tickers` | Average of available `symbol_sentiment.sentiment_score` records. Returns `scope`, `sentiment_score`, `ticker_count`, `computed_at`; performs no write. |
+| `GET /stats` | None | Counts, average sentiment, and ten most recently updated symbols. |
+| `GET /symbols` | Query `skip=0`, `limit=100` | Page of distinct symbols read from the upstream `option_lifetimes` table via read-only SQLite. |
+| `GET /articles/{symbol}` | Query `limit=50` | Most recently fetched stored articles; 404 when none exist. |
+| `DELETE /articles/cleanup` | Header `X-API-Key`; query `days=1` | Deletes `news_articles` older than the cutoff and commits immediately. |
+| `POST /migrate` | Header `X-API-Key`; JSON `{"json_file_path":"...","backup_existing":true}` | Reads a server-local JSON path and inserts legacy ticker sentiment records. When backup is enabled, writes `sentiment_backup_<timestamp>.json` in the process working directory. |
+| `POST /scheduler/trigger` | Header `X-API-Key` | Enqueues a full ticker sentiment run if one is not already active. |
+| `GET /scheduler/status` | None | Scheduler running state, processing flag, and jobs with next-run timestamps. |
+| `POST /scheduler/configure` | Header `X-API-Key`; JSON `{"interval_minutes":60,"enabled":true}`; interval 5–1440 | Reschedules or removes the in-process aggregation job. Configuration is not persisted across restart. |
 
-### POST /sentiment/{symbol}/score
-- **File:** `news_server.py:614`
-- **Auth:** None
-- **Purpose:** Primary sentiment endpoint. Fetches/scores news for a ticker. Returns cached data unless `force_refresh=true`. Used by option-getter per-ticker during scan.
-- **Input:** Path param `symbol` (ticker). Query params: `include_articles=false`, `force_refresh=false`
-- **Example output (`SentimentResponse`):**
-  ```json
-  {
-    "symbol": "AAPL",
-    "sentiment_score": 0.62,
-    "article_count": 14,
-    "from_cache": true,
-    "computed_at": "2026-04-21T13:45:00Z",
-    "articles": []
-  }
-  ```
+`SentimentResponse` contains `symbol`, nullable `symbol_name`, `sentiment_score`, `article_count`, `articles`, `source_breakdown`, `last_updated`, and `from_cache`.
 
----
+## Interfaces that are present but not exposed
 
-### GET /sentiment/aggregate
-- **File:** `news_server.py:858`
-- **Auth:** None
-- **Purpose:** Aggregate sentiment across all tracked tickers, or scoped to a subset. **Primary endpoint used by option-getter** for market-wide and sector-level prefetch at the start of each scan cycle. No DB writes — pure in-memory aggregation from `SymbolSentiment`.
-- **Input:** Query param `tickers` (optional, comma-separated, e.g. `?tickers=AAPL,MSFT,GOOG`)
-- **Example output:**
-  ```json
-  {
-    "scope": "market",
-    "sentiment_score": 0.31,
-    "ticker_count": 87,
-    "computed_at": "2026-04-21T14:00:00Z"
-  }
-  ```
-  With `?tickers=AAPL,MSFT`:
-  ```json
-  {
-    "scope": "filtered",
-    "sentiment_score": 0.55,
-    "ticker_count": 2,
-    "computed_at": "2026-04-21T14:00:00Z"
-  }
-  ```
+`api.py` declares an `APIRouter(prefix="/api")`, including `/api/sentiment/{symbol}` and `/api/sentiment/{symbol}/latest`, but `news_server.py` never includes that router. Those paths are not part of the running API. `services/processor.py` is similarly a legacy parallel implementation used by that unmounted router.
 
----
+## External calls made
 
-### GET /sentiment/{symbol}/latest
-- **File:** `api.py:95`
-- **Auth:** None
-- **Purpose:** Latest cached sentiment for a symbol without triggering a fetch.
-- **Input:** Path param `symbol`
-- **Example output:** Same shape as `SentimentResponse` above.
+| Target | Interface | Configuration | Purpose |
+|---|---|---|---|
+| NewsAPI | `GET https://newsapi.org/v2/everything` | `NEWSAPI_KEY`; `NEWS_HTTP_CONNECT_TIMEOUT_SECONDS`; `NEWS_HTTP_READ_TIMEOUT_SECONDS`; optional `NEWS_HTTP_USER_AGENT` | Up to 50 English articles from configured financial sources. |
+| NewsData | `GET https://newsdata.io/api/1/news` | `NEWSDATA_KEY`; shared `NEWS_HTTP_*` timeout/user-agent settings | Business and technology articles. |
+| Google News | RSS search URL under `news.google.com` | shared `NEWS_HTTP_*` timeout/user-agent settings | Fallback/additional headlines. |
+| Finnhub, through editable `shared-options` | `fetch_us_tickers_from_finnhub(None)` | Credentials are managed by the shared library/environment | Refresh the local `tickers` table at startup and every two weeks. |
+| Hugging Face model hub | model `ProsusAI/finbert` | `USE_TRANSFORMERS=true` | Downloads/loads optional transformer artifacts; otherwise keyword scoring is used. |
 
----
-
-### POST /sentiment/{symbol}
-- **File:** `api.py:40`
-- **Auth:** None
-- **Purpose:** Compute and store sentiment for a symbol (alias for the score endpoint via router).
-- **Input:** Path param `symbol`
-- **Example output:** Same shape as `SentimentResponse`.
-
----
-
-### GET /stats
-- **File:** `news_server.py:761`
-- **Auth:** None
-- **Purpose:** Database stats — article counts, sentiment record counts.
-- **Input:** None
-- **Example output:**
-  ```json
-  {
-    "total_articles": 42800,
-    "total_sentiments": 3200,
-    "symbols_tracked": 87,
-    "oldest_article": "2026-01-01T00:00:00Z",
-    "newest_article": "2026-04-21T14:00:00Z"
-  }
-  ```
-
----
-
-### GET /symbols
-- **File:** `news_server.py:795`
-- **Auth:** None
-- **Purpose:** List all tracked ticker symbols.
-- **Input:** None
-- **Example output:**
-  ```json
-  { "symbols": ["AAPL", "MSFT", "NVDA", "GOOGL"] }
-  ```
-
----
-
-### GET /articles/{symbol}
-- **File:** `news_server.py:815`
-- **Auth:** None
-- **Purpose:** Recent articles for a specific symbol.
-- **Input:** Path param `symbol`. Query param `limit` (optional, default 50)
-- **Example output:**
-  ```json
-  {
-    "symbol": "AAPL",
-    "articles": [
-      { "title": "Apple reports record revenue", "url": "https://...", "published_at": "2026-04-20T10:00:00Z", "sentiment": 0.8 }
-    ]
-  }
-  ```
-
----
-
-### DELETE /articles/cleanup
-- **File:** `news_server.py:901`
-- **Auth:** None
-- **Purpose:** Purge articles older than a configured retention window.
-- **Input:** None
-- **Example output:**
-  ```json
-  { "deleted": 1200 }
-  ```
-
----
-
-### POST /migrate
-- **File:** `news_server.py:661`
-- **Auth:** None
-- **Purpose:** Migrate existing JSON news data files into the database.
-- **Input:**
-  ```json
-  { "json_file_path": "/path/to/news_cache.json", "backup_existing": true }
-  ```
-- **Example output:**
-  ```json
-  { "migrated": 420, "skipped": 12, "errors": 0 }
-  ```
-
----
-
-### POST /scheduler/trigger
-- **File:** `news_server.py:693`
-- **Auth:** None
-- **Purpose:** Manually trigger a background batch processing cycle for all tickers.
-- **Input:** None
-- **Example output:**
-  ```json
-  { "status": "triggered" }
-  ```
-
----
-
-### GET /scheduler/status
-- **File:** `news_server.py:706`
-- **Auth:** None
-- **Purpose:** Background APScheduler status and next run time.
-- **Input:** None
-- **Example output:**
-  ```json
-  {
-    "running": true,
-    "next_run": "2026-04-21T15:00:00Z",
-    "interval_minutes": 60
-  }
-  ```
-
----
-
-### POST /scheduler/configure
-- **File:** `news_server.py:727`
-- **Auth:** None
-- **Purpose:** Update scheduler interval or settings.
-- **Input:**
-  ```json
-  { "interval_minutes": 30 }
-  ```
-- **Example output:**
-  ```json
-  { "status": "ok", "interval_minutes": 30 }
-  ```
-
----
-
-## External Calls Made
-
-| Target | Method | URL | Purpose | Source File |
-|---|---|---|---|---|
-| News/RSS feeds | GET | Various external news APIs | Headline fetch for sentiment scoring | `services/news_aggregator.py` |
+HTTP clients use bounded request timeouts by default: 3 seconds to connect and 10 seconds to read. Override with `NEWS_HTTP_CONNECT_TIMEOUT_SECONDS` and `NEWS_HTTP_READ_TIMEOUT_SECONDS` when provider/network conditions require it. Consult each provider’s terms and quota behavior before changing polling volume.
