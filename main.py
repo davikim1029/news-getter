@@ -10,6 +10,10 @@ try:
 except ImportError:
     pass
 
+from path_bootstrap import ensure_shared_options_path
+
+ensure_shared_options_path()
+
 import sys
 import os
 import subprocess
@@ -106,9 +110,9 @@ def get_process_using_port(port: int):
     """Find process using specified port"""
     try:
         conns = psutil.net_connections(kind="inet")
-    except psutil.AccessDenied:
+    except (psutil.AccessDenied, PermissionError, OSError) as exc:
         logger.logMessage(
-            "[Shutdown] Access denied while scanning network connections"
+            f"[Shutdown] Unable to scan network connections: {exc}"
         )
         return None
 
@@ -144,15 +148,21 @@ def kill_process_using_port(port: int):
 def kill_processes_by_name(name_fragment: str):
     """Kill processes where cmdline contains name_fragment"""
     killed = 0
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            text = " ".join(proc.info['cmdline']) if proc.info['cmdline'] else proc.info['name']
-            if text and name_fragment.lower() in text.lower():
-                print(f"[CLEANUP] Killing process: PID={proc.pid}, NAME={proc.info['name']}")
-                proc.terminate()
-                killed += 1
-        except Exception:
-            continue
+    try:
+        processes = psutil.process_iter(['pid', 'name', 'cmdline'])
+        for proc in processes:
+            try:
+                text = " ".join(proc.info['cmdline']) if proc.info['cmdline'] else proc.info['name']
+                if text and name_fragment.lower() in text.lower():
+                    print(f"[CLEANUP] Killing process: PID={proc.pid}, NAME={proc.info['name']}")
+                    proc.terminate()
+                    killed += 1
+            except Exception:
+                continue
+    except (psutil.AccessDenied, PermissionError, OSError) as exc:
+        logger.logMessage(
+            f"[Shutdown] Unable to scan process list: {exc}"
+        )
     
     return killed
 

@@ -5,3 +5,6 @@ __pycache__/
 .env
 *.log
 *.pid
+cache/
+database/*.db
+database/*.db-*

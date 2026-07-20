@@ -8,6 +8,10 @@ Features:
 3. REST API for on-demand news retrieval
 """
 
+from path_bootstrap import ensure_shared_options_path
+
+ensure_shared_options_path()
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query
 from typing import Optional, List, Dict, Any
 from dateutil.parser import parse as parse_datetime
@@ -35,10 +39,9 @@ from database.database import (
     get_db,
     list_option_symbols,
 )
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-import json
 
 # Import your existing news aggregator
 from services.news_aggregator import (
@@ -46,7 +49,6 @@ from services.news_aggregator import (
     compute_headlines_sentiment,
     Headline,
 )
-from services.core.cache_manager import RateLimitCache, HeadlineCache
 from shared_options.log.logger_singleton import getLogger
 from shared_options.log.logger import LogType
 from shared_options.services.monitor_status import MonitorStatus

@@ -16,17 +16,26 @@ Design:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
 from datetime import datetime, timezone
+from html import unescape
+from threading import Lock
+from typing import List, Optional
+
 import os
-import requests
-import feedparser
 import math
 import re
-from html import unescape
+import feedparser
+import requests
+
+from path_bootstrap import is_schema_export
 from shared_options.log.logger_singleton import getLogger
-from services.core.cache_manager import RateLimitCache,HeadlineCache
-from services.utils import is_rate_limited
+from services.core.cache_manager import HeadlineCache, RateLimitCache
+
+if is_schema_export():
+    def is_rate_limited(cache: RateLimitCache, key: str) -> bool:
+        return False
+else:
+    from services.utils import is_rate_limited
 
 logger = getLogger()
 
@@ -62,8 +71,6 @@ class NoHeadlinesException(Exception):
 class AggregatorException(Exception):
     """Raised for general aggregator errors"""
     pass
-
-# Add to the top of news_aggregator.py after imports
 
 def warmup_transformer_model():
     """
@@ -356,10 +363,6 @@ SOURCE_WEIGHTS = {
 
 # Optional transformer support — controlled via USE_TRANSFORMERS env var (default false)
 USE_TRANSFORMERS = os.getenv("USE_TRANSFORMERS", "false").lower() == "true"
-_transformer_pipeline = None
-
-
-from threading import Lock
 
 _transformer_pipeline = None
 _transformer_failed = False
@@ -443,8 +446,6 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
         texts = [h.combined_text()[:400] for h in headlines]
 
         # Transformer path (yields roughly -1..1 via mapping)
-        # In news_aggregator.py, modify the transformer section:
-
         if USE_TRANSFORMERS:
             pipeline = _load_transformer_pipeline()
             if pipeline:
@@ -524,7 +525,12 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
 # -------------------------------------------------------
 # Convenience: one-call sentiment getter used in scanner
 # -------------------------------------------------------
-def get_sentiment_signal(ticker: str, ticker_name: str = "", rate_cache: RateLimitCache = None,headline_cache: HeadlineCache = None) -> Optional[float]:
+def get_sentiment_signal(
+    ticker: str,
+    ticker_name: str = "",
+    rate_cache: RateLimitCache = None,
+    headline_cache: HeadlineCache = None,
+) -> Optional[float]:
     """
     Fetch headlines and compute sentiment signal.
     Returns float in [-1,1] or None if upstream rate-limited (so caller can back off).
@@ -536,7 +542,8 @@ def get_sentiment_signal(ticker: str, ticker_name: str = "", rate_cache: RateLim
             return None
         if not headlines:
             return 0.0
-        headline_cache.add(ticker,strip_unwanted_fields(headlines))
+        if headline_cache is not None:
+            headline_cache.add(ticker, strip_unwanted_fields(headlines))
         return compute_headlines_sentiment(headlines)
     except Exception as e:
         logger.logMessage(f"[Aggregator] get_sentiment_signal error for {ticker}: {e}")

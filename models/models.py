@@ -1,12 +1,14 @@
-from sqlalchemy import Column, String, Float, DateTime, Text, Integer, UniqueConstraint, Index
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+import json
 from dataclasses import dataclass
 from datetime import datetime
-from database.database import Base
-from services.core.cache_manager import RateLimitCache, HeadlineCache
+from typing import Any, Dict, List, Optional
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pydantic import BaseModel, Field
+from database.database import Base
+from path_bootstrap import is_schema_export
+from services.core.cache_manager import RateLimitCache, HeadlineCache
+from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 
 # ===========================
 # Global State
@@ -14,8 +16,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 class AppState:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
-        self.rate_cache = RateLimitCache()
-        self.headline_cache = HeadlineCache()
+        if is_schema_export():
+            self.rate_cache = None
+            self.headline_cache = None
+        else:
+            self.rate_cache = RateLimitCache()
+            self.headline_cache = HeadlineCache()
         self.is_processing = False
 
 
@@ -117,9 +123,6 @@ class OptionLifetime(Base):
     osiKey = Column("osiKey", Text, primary_key=True)
     timestamp = Column(Text, nullable=False)
     symbol = Column(Text, nullable=False, index=True)
-
-
-import json
 
 def sentiment_to_dict(
     record: SymbolSentiment,
