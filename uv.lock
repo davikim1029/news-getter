@@ -1608,6 +1608,9 @@ requires-dist = [
     { name = "urllib3" },
 ]
 
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
 [[package]]
 name = "shellingham"
 version = "1.5.4"
