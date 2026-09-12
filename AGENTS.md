@@ -27,6 +27,8 @@ Before writing any code that calls another service, **read that service's `docs/
 
 This service is part of a larger monorepo — see the parent `AGENTS.md` at `../AGENTS.md` for full architecture context.
 
+**What is currently being *worked on* lives in [`../docs/WORKPLAN.md`](../docs/WORKPLAN.md), not here** — read its *RESUME HERE* section before planning anything. This file describes how the service is built; the register says what is being done to it, what is scheduled, and what has been verified on the box. Re-measure before acting on any dated claim in either.
+
 ## Setup & Running
 
 ```bash
