@@ -94,16 +94,19 @@ def _init_logger():
 # Helper Functions
 # -----------------------------
 def is_server_running():
-    """Check if server process is running"""
-    if not PID_FILE.exists():
-        return False
-    try:
-        pid = int(PID_FILE.read_text())
-        os.kill(pid, 0)  # check if process exists
-        return True
-    except (ValueError, ProcessLookupError):
-        PID_FILE.unlink(missing_ok=True)
-        return False
+    """Check if *this* server process is running — PID identity, then the port."""
+    # PIDLOOP-01 (2026-09-19): a bare os.kill(pid, 0) here answers "some process holds
+    # that number", not "my service is running". After a reboot PID numbers are reused,
+    # and option-file-server spent hours refusing to start because its stale pid file
+    # named 397, which had become news-getter's uvicorn. Identity + port fallback, from
+    # the single shared implementation.
+    from shared_options.services import pid_guard
+
+    return pid_guard.service_is_running(
+        PID_FILE,
+        cmdline_all_of=("uvicorn", APP_NAME),
+        port=PORT,
+    )
 
 
 def get_process_using_port(port: int):
