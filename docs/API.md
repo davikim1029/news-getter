@@ -17,16 +17,11 @@ Implementation source of truth: `news_server.py` (`news_server:app`). FastAPI al
 | `GET /symbols` | Query `skip=0`, `limit=100` | Page of distinct symbols read from the upstream `option_lifetimes` table via read-only SQLite. |
 | `GET /articles/{symbol}` | Query `limit=50` | Most recently fetched stored articles; 404 when none exist. |
 | `DELETE /articles/cleanup` | Header `X-API-Key`; query `days=1` | Deletes `news_articles` older than the cutoff and commits immediately. |
-| `POST /migrate` | Header `X-API-Key`; JSON `{"json_file_path":"...","backup_existing":true}` | Reads a server-local JSON path and inserts legacy ticker sentiment records. When backup is enabled, writes `sentiment_backup_<timestamp>.json` in the process working directory. |
 | `POST /scheduler/trigger` | Header `X-API-Key` | Enqueues a full ticker sentiment run if one is not already active. |
 | `GET /scheduler/status` | None | Scheduler running state, processing flag, and jobs with next-run timestamps. |
 | `POST /scheduler/configure` | Header `X-API-Key`; JSON `{"interval_minutes":60,"enabled":true}`; interval 5–1440 | Reschedules or removes the in-process aggregation job. Configuration is not persisted across restart. |
 
 `SentimentResponse` contains `symbol`, nullable `symbol_name`, `sentiment_score`, `article_count`, `articles`, `source_breakdown`, `last_updated`, and `from_cache`.
-
-## Interfaces that are present but not exposed
-
-`api.py` declares an `APIRouter(prefix="/api")`, including `/api/sentiment/{symbol}` and `/api/sentiment/{symbol}/latest`, but `news_server.py` never includes that router. Those paths are not part of the running API. `services/processor.py` is similarly a legacy parallel implementation used by that unmounted router.
 
 ## External calls made
 

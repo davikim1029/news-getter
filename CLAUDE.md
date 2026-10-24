@@ -41,7 +41,7 @@ python main.py --mode start-server  # start uvicorn once
 python main.py --mode monitor       # monitor loop (auto-restart on crash)
 python main.py --mode stop          # stop server via PID
 python main.py --mode check         # check if server is running
-python main.py --mode stats         # interactive SQL query runner (analytics/sql/*.sql)
+python main.py --mode stats         # print summary statistics from the running server's /stats
 python main.py --mode logs          # tail last N lines of log
 python main.py                      # interactive menu
 ```
@@ -56,23 +56,19 @@ Process files:
 
 ### Entry Points
 
-- `news_server.py` — FastAPI app (`news_server:app`), uvicorn target. Manages APScheduler lifecycle via `@asynccontextmanager lifespan`.
+- `news_server.py` — FastAPI app (`news_server:app`), uvicorn target, and every REST route. Manages APScheduler lifecycle via `@asynccontextmanager lifespan`.
 - `main.py` — CLI wrapper that spawns uvicorn as a subprocess and implements the monitor loop.
-- `api.py` — REST API route definitions.
 
 ### Services
 
-- `services/news_aggregator.py` — `aggregate_headlines_smart()`: fetches RSS/API headlines, deduplicates, and scores sentiment.
-- `services/processor.py` — batch processing of headline sentiment.
-- `services/core/cache_manager.py` — `RateLimitCache` and `HeadlineCache` for deduplication and rate-limit management.
-- `services/core/deps.py` — FastAPI dependency injection helpers.
+- `services/news_aggregator.py` — `aggregate_headlines_smart()` fetches headlines from NewsAPI, NewsData and Google News RSS; `compute_headlines_sentiment()` scores them.
+- `services/core/cache_manager.py` — `RateLimitCache`: remembers which news provider rate-limited us and until when.
 
 ### Database
 
 SQLAlchemy-managed SQLite database in `database/`. Models in `models/models.py` include:
-- `SymbolSentiment` — aggregated sentiment score per ticker
-- `NewsArticle` — individual article records
-- `TickerSentiment` — per-ticker sentiment timeseries
+- `SymbolSentiment` — latest aggregated sentiment score per ticker
+- `NewsArticle` — individual article records (kept for one day)
 
 ### Background Scheduling
 
@@ -82,19 +78,18 @@ APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler 
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /sentiment/{ticker}` | GET | Per-ticker sentiment score |
+| `POST /sentiment/{symbol}/score` | POST | Per-ticker sentiment score (cached for an hour unless `force_refresh=true`) |
 | `GET /sentiment/aggregate` | GET | Aggregate sentiment across tickers. Optional `?tickers=AAPL,MSFT` to scope to specific tickers. Returns `{scope, sentiment_score, ticker_count, computed_at}`. No DB writes — pure aggregation from `SymbolSentiment`. Used by `option-getter` to prefetch market-wide and sector-level sentiment once per scan cycle. |
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `news_server.py` | FastAPI app with APScheduler lifecycle + `GET /sentiment/aggregate` endpoint |
-| `api.py` | REST API endpoints |
+| `news_server.py` | FastAPI app, APScheduler lifecycle and every REST endpoint |
 | `services/news_aggregator.py` | Headline fetch + sentiment scoring |
-| `services/core/cache_manager.py` | Rate-limit + headline deduplication cache |
+| `services/core/cache_manager.py` | Provider rate-limit cache |
 | `database/database.py` | SQLAlchemy engine, session, and `init_database()` |
-| `models/models.py` | Pydantic/SQLAlchemy data models |
+| `models/models.py` | Pydantic/SQLAlchemy data models and the process-wide `AppState` |
 
 ## Environment Variables
 

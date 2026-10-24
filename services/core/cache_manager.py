@@ -2,15 +2,14 @@
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from threading import RLock
 from shared_options.services.shutdown_handler import ShutdownManager
 from shared_options.log.logger_singleton import getLogger
-import shutil
-from pathlib import Path
+
 
 class CacheManager:
-    
+
     """
     Thread-safe cache manager with TTL, autosave, and JSON persistence.
     """
@@ -20,8 +19,7 @@ class CacheManager:
                  filepath: str,
                  ttl_days: float = None,
                  ttl_hours: float = None,
-                 ttl_minutes: float = None,
-                 autosave_interval: int = 60):
+                 ttl_minutes: float = None):
         self._cache = {}
         self._lock = RLock()
 
@@ -30,22 +28,7 @@ class CacheManager:
         self.ttl_days = ttl_days
         self.ttl_hours = ttl_hours
         self.ttl_minutes = ttl_minutes
-        self.autosave_interval = autosave_interval
         self.logger = getLogger()
-        
-        
-        # ------------------------
-        # New global scanner config
-        # ------------------------
-        self.scanner_config = {
-            "parallel": os.environ.get("BUY_PARALLEL", "1") == "1",
-            "max_workers": int(os.environ.get("BUY_MAX_WORKERS", "8")),
-            "min_volume": int(os.environ.get("MIN_VOLUME", "50")),
-            "min_ask_cents": int(os.environ.get("MIN_ASK_CENTS", "5")),
-            "max_ask_cents": int(os.environ.get("MAX_ASK_CENTS", "50")),
-            "strike_range_pct": int(os.environ.get("STRIKE_RANGE_PCT", "20"))
-        }
-
 
         try:
             ShutdownManager.register(self.name, lambda reason=None: self._save_cache())
@@ -82,7 +65,7 @@ class CacheManager:
             self.logger.logMessage(f"[{self.name}] Cache file empty or corrupted, starting fresh")
         except Exception as e:
             self.logger.logMessage(f"[{self.name}] Failed to load cache: {e}")
-            
+
     def _save_cache(self):
         try:
             # Copy under lock
@@ -104,12 +87,6 @@ class CacheManager:
         except Exception as e:
             self.logger.logMessage(f"[{self.name}] Failed to save cache: {e}")
 
-
-    def autosave_loop(self, stop_event):
-        while not stop_event.is_set():
-            self._save_cache()
-            stop_event.wait(self.autosave_interval)
-
     # ----------------------------
     # TTL / Expiration
     # ----------------------------
@@ -130,30 +107,9 @@ class CacheManager:
     def add(self, key, value):
         with self._lock:
             self._cache[key] = {
-                "Value": self._convert_nested_tuples(value),
+                "Value": value,
                 "Timestamp": datetime.now().astimezone()
             }
-
-    def get(self, key):
-        if self.is_cached(key):
-            return self._cache[key]["Value"]
-        return None
-
-    def is_cached(self, key):
-        with self._lock:
-            item = self._cache.get(key)
-            if item:
-                if self.is_expired(item["Timestamp"]):
-                    del self._cache[key]
-                    return False
-                return True
-            return False
-    
-    def delete_key(self,key):
-        with self._lock:
-            item = self._cache.get(key)
-            if item:
-                del self._cache[key]
 
     def evict_expired(self) -> int:
         with self._lock:
@@ -162,162 +118,31 @@ class CacheManager:
                 del self._cache[k]
         return len(expired)
 
-    def clear(self):
-        with self._lock:
-            self._cache.clear()
-        self._save_cache()
-
-    def is_empty(self):
-        return not bool(self._cache)
-
-    # ----------------------------
-    # Utility Methods
-    # ----------------------------
-    def _convert_nested_tuples(self, value):
-        if not isinstance(value, dict):
-            return value
-        nested = {}
-        for key, val in value.items():
-            if isinstance(key, tuple):
-                current = nested
-                for k in key[:-1]:
-                    current = current.setdefault(k, {})
-                current[key[-1]] = val
-            else:
-                nested[key] = val
-        return nested
-
-    def maybe_convert_tuples(self, value):
-        if isinstance(value, dict) and any(isinstance(k, tuple) for k in value.keys()):
-            return self._convert_nested_tuples(value)
-        return value
-    
-    
-    def copy_cache_to_file(self, backup_folder: str = "data/ticker_eval",filename: str = ""):
-        """
-        Make a timestamped copy of a Cache file.
-        """
-        
-        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
-        if filename == "":
-            filename = f"{self.name.replace(' ', '_')}_{timestamp}.json"
-        if not filename.endswith(".json"):
-            filename = f"{filename}.json"
-            
-        backup_dir = Path(backup_folder)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        src = Path(self.filepath)
-        dst = backup_dir / f"{filename}"
-
-        try:
-            shutil.copy2(src, dst)
-            self.logger.logMessage(f"[{self.name} Backup] Saved backup to {dst}")
-        except Exception as e:
-            self.logger.logMessage(f"[{self.name} Backup] Failed to backup: {e}")
-
-
-# ----------------------------
-# Concrete Caches
-# ----------------------------
-class IgnoreTickerCache(CacheManager):
-    def __init__(self):
-        super().__init__("IgnoreTicker Cache", "cache/ignore_tickers.json", ttl_days=30, autosave_interval=60)
-
-
-class BoughtTickerCache(CacheManager):
-    def __init__(self):
-        super().__init__("BoughtTicker Cache", "cache/bought_tickers.json", ttl_hours=6, autosave_interval=60)
-
-
-class NewsApiCache(CacheManager):
-    def __init__(self):
-        super().__init__("NewsApi Cache", "cache/newsapi_sentiment.json", ttl_hours=6, autosave_interval=60)
-        
-class HeadlineCache(CacheManager):
-    def __init__(self):
-        super().__init__("Headline Cache", "cache/headlines.json", ttl_hours=6, autosave_interval=60)
-
 
 class RateLimitCache(CacheManager):
     def __init__(self):
-        super().__init__("RateLimit Cache", "cache/ratelimit_sentiment.json", ttl_days=1, autosave_interval=60)
+        super().__init__("RateLimit Cache", "cache/ratelimit_sentiment.json", ttl_days=1)
 
-class YFinanceTickerCache(CacheManager):
-    def __init__(self):
-        super().__init__("YFinance Ticker Cache", "cache/yfinance_ticker.json", ttl_days=30, autosave_interval=60)
+    def is_limited(self, key: str) -> bool:
+        """
+        Check if a rate limit for `key` is still active.
+        Returns True if still limited, False if expired.
+        """
+        with self._lock:
+            item = self._cache.get(key)
+            if not item:
+                return False  # not cached at all
 
+            reset_seconds = item.get("Value")
+            timestamp = item.get("Timestamp")
 
-class TickerCache(CacheManager):
-    def __init__(self):
-        super().__init__("Ticker Cache", "cache/tickers.json", ttl_days=30)
+            if reset_seconds is None or timestamp is None:
+                return False  # malformed entry, treat as expired
 
+            reset_time = timestamp + timedelta(seconds=reset_seconds)
+            if datetime.now().astimezone() >= reset_time:
+                # expired, remove from cache
+                del self._cache[key]
+                return False
 
-class EvalCache(CacheManager):
-    def __init__(self):
-        super().__init__("Eval Cache", "cache/evaluated.json", ttl_minutes=30)
-
-
-class LastTickerCache(CacheManager):
-    def __init__(self):
-        super().__init__("LastTicker Cache", "cache/last_ticker.json", ttl_days=1)
-        
-class TickerMetadata(CacheManager):
-    def __init__(self):
-        super().__init__("TickerMetadata Cache","cache/ticker_metadata.json",ttl_days=5)
-
-
-# ----------------------------
-# Unified Cache Container
-# ----------------------------
-class Caches:
-    """
-    One container for all caches to simplify function signatures and ThreadManager integration.
-    """
-    def __init__(self):
-        self.ignore = IgnoreTickerCache()
-        self.bought = BoughtTickerCache()
-        self.news = NewsApiCache()
-        self.rate = RateLimitCache()
-        self.ticker = TickerCache()
-        self.eval = EvalCache()
-        self.yfin = YFinanceTickerCache()
-        self.last_seen = LastTickerCache()
-        self.ticker_metadata = TickerMetadata()
-        self.headlines = HeadlineCache()
-
-    # Return list of all caches (for loops in scanner)
-    def all_caches(self):
-        return [
-            self.ignore,
-            self.bought,
-            self.news,
-            self.rate,
-            self.ticker,
-            self.eval,
-            self.yfin,
-            self.last_seen,
-            self.ticker_metadata,
-            self.headlines
-        ]
-
-    # Return tuples for autosave loops (for ThreadManager)
-    def all_autosave_loops(self):
-        return [
-            (self.ignore.autosave_loop, "Ignore Cache Autosave"),
-            (self.bought.autosave_loop, "Bought Cache Autosave"),
-            (self.news.autosave_loop, "NewsAPI Cache Autosave"),
-            (self.rate.autosave_loop, "RateLimit Cache Autosave"),
-            (self.last_seen.autosave_loop, "Last Ticker Cache Autosave"),
-            (self.ticker_metadata.autosave_loop,"Ticker Metadata Cache Autosave"),
-            (self.eval.autosave_loop,"Evaluation Cache Autosave"),
-            (self.yfin.autosave_loop, "YFinance Cache Autosave"),
-            (self.headlines.autosave_loop, "Headline Cache Autosave")
-        ]
-
-    # Clear all caches
-    def clear_all(self):
-        for cache in self.all_caches():
-            cache.clear()
-
-
+            return True

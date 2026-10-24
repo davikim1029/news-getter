@@ -280,7 +280,7 @@ def check_server():
         pid = int(PID_FILE.read_text())
         proc = psutil.Process(pid)
         
-        print(f"✓ Server is running")
+        print("✓ Server is running")
         print(f"  PID: {pid}")
         print(f"  CPU: {proc.cpu_percent()}%")
         print(f"  Memory: {proc.memory_info().rss / 1024 / 1024:.1f} MB")
@@ -461,19 +461,6 @@ def get_mode_from_prompt():
                 return key
         
         print("Invalid choice, try again.")
-
-def wait_for_server(port=PORT, timeout=600):
-    import requests
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            r = requests.get(f"http://localhost:{port}", timeout=1)
-            if r.status_code == 200:
-                return True
-        except requests.ConnectionError:
-            pass
-        time.sleep(0.5)
-    return False
 
 
 # -----------------------------

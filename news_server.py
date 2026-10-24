@@ -4,63 +4,65 @@ FastAPI News Aggregator Service
 
 Features:
 1. Background task scheduler for automated news aggregation
-2. JSON data migration to database
-3. REST API for on-demand news retrieval
+2. REST API for on-demand news retrieval
 """
 
 from path_bootstrap import ensure_shared_options_path
 
 ensure_shared_options_path()
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query
-from typing import Optional, List, Dict, Any
-from dateutil.parser import parse as parse_datetime
-from datetime import datetime, timezone
 import asyncio
-import os
 import json
-from contextlib import asynccontextmanager
-from models.models import (
-    SymbolSentiment,
-    SymbolSentimentOut,
-    NewsArticle,
-    OptionLifetime,
-    SentimentResponse,
-    MigrationRequest,
-    SchedulerConfig,
-    AppState,
-    TickerSentiment,
-    sentiment_to_dict
-)
+import os
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Optional
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from dateutil.parser import parse as parse_datetime
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from sqlalchemy import func, text
+from sqlalchemy.orm import Session
+
 from database.database import (
     SessionLocal,
     count_option_symbols,
-    init_database,
     get_db,
+    init_database,
     list_option_symbols,
 )
-from sqlalchemy.orm import Session
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-
-# Import your existing news aggregator
+from models.models import (
+    AppState,
+    NewsArticle,
+    SchedulerConfig,
+    SentimentResponse,
+    SymbolSentiment,
+    sentiment_to_dict,
+)
 from services.news_aggregator import (
+    AggregatorException,
+    Headline,
+    RateLimitedException,
     aggregate_headlines_smart,
     compute_headlines_sentiment,
-    Headline,
 )
-from shared_options.log.logger_singleton import getLogger
 from shared_options.log.logger import LogType
-from shared_options.services.monitor_status import MonitorStatus
+from shared_options.log.logger_singleton import getLogger
 from shared_options.services.key_auth import (
     accepted_secrets,
     is_one_of,
     register_env_path,
 )
+from shared_options.services.monitor_status import MonitorStatus
 
 logger = getLogger()
 
 app_state = AppState()
+
+BATCH_SIZE = 20  # process 20 tickers concurrently
+DB_CONCURRENCY_LIMIT = 4
+db_semaphore = asyncio.Semaphore(DB_CONCURRENCY_LIMIT)
 
 
 def _is_production() -> bool:
@@ -93,13 +95,49 @@ def _require_production_auth_config() -> None:
         )
 
 
+@contextmanager
+def db_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _published_iso(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return parse_datetime(value).isoformat() if value else None
+
+
+def _article_to_dict(article: NewsArticle, include_id: bool = False) -> dict:
+    row = {
+        "source": article.source,
+        "title": article.title,
+        "description": article.description,
+        "url": article.url,
+        "published_at": _published_iso(article.published_at),
+        "fetched_at": article.fetched_at.isoformat() if article.fetched_at else None,
+    }
+    return {"id": article.id, **row} if include_id else row
+
+
+def load_symbol_map(db: Session) -> Dict[str, str]:
+    result = db.execute(
+        text("SELECT symbol, name FROM tickers")
+    )
+    return {row.symbol: row.name for row in result}
+
+
+def _symbol_name(db: Session, symbol: str) -> str | None:
+    return db.execute(
+        text("SELECT name FROM tickers WHERE symbol = :symbol"), {"symbol": symbol}
+    ).scalar()
+
+
 # ===========================
 # Core Business Logic
 # ===========================
-from services.news_aggregator import (
-    RateLimitedException,
-    AggregatorException)
-
 async def aggregate_and_store_ticker(
     ticker: str,
     ticker_name: str | None,
@@ -134,20 +172,7 @@ async def aggregate_and_store_ticker(
                         )
 
                         articles = [
-                            {
-                                "source": a.source,
-                                "title": a.title,
-                                "description": a.description,
-                                "url": a.url,
-                                "published_at": (
-                                    a.published_at.isoformat()
-                                    if isinstance(a.published_at, datetime)
-                                    else parse_datetime(a.published_at).isoformat()
-                                    if a.published_at
-                                    else None
-                                ),
-                                "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None,
-                            }
+                            _article_to_dict(a)
                             for a in (
                                 db.query(NewsArticle)
                                 .filter(NewsArticle.symbol == ticker)
@@ -178,8 +203,6 @@ async def aggregate_and_store_ticker(
         # 3. Store articles (DB WRITE)
         # ============================
         with db_session() as db:
-            from datetime import timedelta
-
             now = datetime.now(timezone.utc)
             cutoff_date = now - timedelta(days=1)
 
@@ -217,7 +240,7 @@ async def aggregate_and_store_ticker(
                 if h.url and h.url in existing_urls:
                     continue
 
-                article = NewsArticle(
+                db.add(NewsArticle(
                     symbol=ticker,
                     source=h.source or "unknown",
                     title=h.title or "",
@@ -225,8 +248,7 @@ async def aggregate_and_store_ticker(
                     url=h.url,
                     published_at=h.published_at if h.published_at else None,
                     fetched_at=now,
-                )
-                db.add(article)
+                ))
 
                 articles_data.append(
                     {
@@ -234,13 +256,7 @@ async def aggregate_and_store_ticker(
                         "title": h.title or "",
                         "description": h.description,
                         "url": h.url,
-                        "published_at": (
-                            h.published_at.isoformat()
-                            if isinstance(h.published_at, datetime)
-                            else parse_datetime(h.published_at).isoformat()
-                            if h.published_at
-                            else None
-                        ),
+                        "published_at": _published_iso(h.published_at),
                         "fetched_at": now.isoformat(),
                     }
                 )
@@ -311,11 +327,6 @@ async def aggregate_and_store_ticker(
         raise
 
 
-import asyncio
-from sqlalchemy.orm import Session
-
-BATCH_SIZE = 20  # process 20 tickers concurrently
-
 async def process_all_tickers():
     if app_state.is_processing:
         logger.logMessage("[Scheduler] Already processing, skipping...")
@@ -366,10 +377,6 @@ async def process_all_tickers():
         ms.set_last_event(f"Completed {done}/{total} tickers")
 
 
-DB_CONCURRENCY_LIMIT = 4
-db_semaphore = asyncio.Semaphore(DB_CONCURRENCY_LIMIT)
-
-
 async def process_single_ticker(symbol: str, ticker_name: Optional[str]):
     async with db_semaphore:
         return await aggregate_and_store_ticker(
@@ -378,169 +385,29 @@ async def process_single_ticker(symbol: str, ticker_name: Optional[str]):
         )
 
 
-
-
-from sqlalchemy import text
-
-def load_symbol_map(db: Session) -> Dict[str, str]:
-    result = db.execute(
-        text("SELECT symbol, name FROM tickers")
-    )
-    return {row.symbol: row.name for row in result}
-
-
-def migrate_json_to_db(json_path: str, db: Session, backup: bool = True) -> Dict[str, Any]:
-    """
-    Migrate existing JSON news data to database.
-    
-    Expected JSON format:
-    {
-        "AAPL": {
-            "sentiment": 0.5,
-            "headlines": [...],
-            "timestamp": "2024-01-01T00:00:00Z"
-        },
-        ...
-    }
-    """
-    try:
-        # Backup existing data if requested
-        if backup:
-            backup_data = db.query(TickerSentiment).all()
-            backup_file = f"sentiment_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(backup_file, 'w') as f:
-                json.dump(
-                    [
-                        {
-                            "ticker": r.ticker,
-                            "sentiment_score": r.sentiment_score,
-                            "headlines": json.loads(r.headlines) if r.headlines else [],  # Deserialize for backup
-                            "last_updated": r.last_updated.isoformat()
-                        }
-                        for r in backup_data
-                    ],
-                    f,
-                    indent=2
-                )
-            logger.logMessage(f"[Migration] Backup saved to {backup_file}", log_type=LogType.Server)
-        
-        # Load JSON data
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-        
-        migrated = 0
-        errors = 0
-        
-        for ticker, ticker_data in data.items():
-            try:
-                headlines = ticker_data.get("headlines", [])
-                
-                # Count by source
-                source_breakdown = {}
-                for h in headlines:
-                    source = h.get("source", "unknown")
-                    source_breakdown[source] = source_breakdown.get(source, 0) + 1
-                
-                # Parse timestamp
-                timestamp_str = ticker_data.get("timestamp")
-                timestamp = None
-                if timestamp_str:
-                    try:
-                        timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    except:
-                        timestamp = datetime.now(timezone.utc)
-                else:
-                    timestamp = datetime.now(timezone.utc)          
-                
-                record = TickerSentiment(
-                    ticker=ticker.upper(),
-                    ticker_name=ticker_data.get("ticker_name"),
-                    sentiment_score=ticker_data.get("sentiment", 0.0),
-                    headlines=json.dumps(headlines),  # Serialize to JSON string
-                    headline_count=len(headlines),
-                    source_breakdown=json.dumps(source_breakdown),  # Serialize to JSON string
-                    last_updated=timestamp
-                )
-                
-                db.add(record)
-                migrated += 1
-                
-            except Exception as e:
-                logger.logMessage(f"[Migration] Error migrating {ticker}: {e}", log_type=LogType.Server)
-                errors += 1
-        
-        db.commit()
-        
-        result = {
-            "status": "success",
-            "migrated": migrated,
-            "errors": errors,
-            "total": len(data)
-        }
-        
-        logger.logMessage(f"[Migration] Complete: {result}", log_type=LogType.Server)
-        return result
-        
-    except Exception as e:
-        logger.logMessage(f"[Migration] Failed: {e}", log_type=LogType.Server)
-        db.rollback()
-        raise
-
-
 # ===========================
 # Scheduler Setup
 # ===========================
+async def job_wrapper(job_func, **kwargs):
+    try:
+        if asyncio.iscoroutinefunction(job_func):
+            await job_func(**kwargs)
+        else:
+            await asyncio.to_thread(job_func, **kwargs)
+    except Exception as e:
+        logger.logMessage(f"[Scheduler] Error in job {job_func.__name__}: {e}")
+
+
 async def _evict_caches():
     if app_state.rate_cache:
         n = app_state.rate_cache.evict_expired()
         if n:
             logger.logMessage(f"[Cache] Evicted {n} expired rate-limit entries")
 
-async def start_scheduler():
-    """Initialize and start the background scheduler"""
-    app_state.scheduler = AsyncIOScheduler()
-    
-    # Default: run every 60 minutes
-    interval_minutes = int(os.getenv("AGGREGATION_INTERVAL_MINUTES", "60"))
-    
-    #Run once at startup
-    print ("[Scheduler] Running initial ticker save at startup...")
-    await save_tickers_to_db(db=SessionLocal())
-    print ("[Scheduler] Initial ticker save complete.")
-    app_state.scheduler.add_job(
-        job_wrapper,
-        trigger=IntervalTrigger(minutes=interval_minutes),
-        id="news_aggregation",
-        name="Aggregate news for all tickers",
-        replace_existing=True,
-        kwargs={"job_func": process_all_tickers}  # job_wrapper now calls this
-    )
-    
-    app_state.scheduler.add_job(
-        job_wrapper,
-        trigger=IntervalTrigger(weeks=2),
-        id="ticker_saver",
-        name="Fetch and save US tickers to database",
-        replace_existing=True,
-        kwargs={"job_func": save_tickers_to_db}
-    )
-
-    app_state.scheduler.add_job(
-        job_wrapper,
-        trigger=IntervalTrigger(minutes=30),
-        id="cache_eviction",
-        name="Evict expired in-memory cache entries",
-        replace_existing=True,
-        kwargs={"job_func": _evict_caches}
-    )
-
-    app_state.scheduler.start()
-    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
-    
 
 async def save_tickers_to_db(db: Session = None):
     """Fetch and save US tickers to the database"""
-    
+
     logger.logMessage("[Tickers] Fetching and saving US tickers to database...")
     from shared_options.models.tickers import fetch_us_tickers_from_finnhub
     if db is None:
@@ -576,22 +443,53 @@ async def save_tickers_to_db(db: Session = None):
         db.close()
 
 
+async def start_scheduler():
+    """Initialize and start the background scheduler"""
+    app_state.scheduler = AsyncIOScheduler()
+
+    # Default: run every 60 minutes
+    interval_minutes = int(os.getenv("AGGREGATION_INTERVAL_MINUTES", "60"))
+
+    # Run once at startup
+    logger.logMessage("[Scheduler] Running initial ticker save at startup...")
+    await save_tickers_to_db(db=SessionLocal())
+    logger.logMessage("[Scheduler] Initial ticker save complete.")
+    app_state.scheduler.add_job(
+        job_wrapper,
+        trigger=IntervalTrigger(minutes=interval_minutes),
+        id="news_aggregation",
+        name="Aggregate news for all tickers",
+        replace_existing=True,
+        kwargs={"job_func": process_all_tickers}  # job_wrapper now calls this
+    )
+
+    app_state.scheduler.add_job(
+        job_wrapper,
+        trigger=IntervalTrigger(weeks=2),
+        id="ticker_saver",
+        name="Fetch and save US tickers to database",
+        replace_existing=True,
+        kwargs={"job_func": save_tickers_to_db}
+    )
+
+    app_state.scheduler.add_job(
+        job_wrapper,
+        trigger=IntervalTrigger(minutes=30),
+        id="cache_eviction",
+        name="Evict expired in-memory cache entries",
+        replace_existing=True,
+        kwargs={"job_func": _evict_caches}
+    )
+
+    app_state.scheduler.start()
+    logger.logMessage(f"[Scheduler] Started with {interval_minutes}min interval")
+
+
 async def stop_scheduler():
     """Shutdown the scheduler gracefully"""
     if app_state.scheduler:
         app_state.scheduler.shutdown()
         logger.logMessage("[Scheduler] Stopped")
-
-
-from contextlib import contextmanager
-
-@contextmanager
-def db_session():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # ===========================
@@ -618,7 +516,7 @@ async def lifespan(app: FastAPI):
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
         await asyncio.to_thread(_load_transformer_pipeline)
-    
+
     await start_scheduler()
     ms.set_step("Idle — waiting for next cycle")
 
@@ -628,7 +526,6 @@ async def lifespan(app: FastAPI):
     ms.set_step("Shutting down")
     logger.logMessage("[App] Shutting down...")
     await stop_scheduler()
-        
 
 
 # ===========================
@@ -655,8 +552,7 @@ async def root():
         "scheduler_running": app_state.scheduler.running if app_state.scheduler else False,
         "is_processing": app_state.is_processing
     }
-    
-from models.models import SentimentResponse
+
 
 @app.post("/sentiment/{symbol}/score", response_model=SentimentResponse)
 async def get_sentiment_score(
@@ -676,17 +572,16 @@ async def get_sentiment_score(
         # aggregate_and_store_ticker now returns a dict compatible with SentimentResponse
         sentiment_data = await aggregate_and_store_ticker(
             ticker=symbol,
-            ticker_name=load_symbol_map(db).get(symbol),
+            ticker_name=_symbol_name(db, symbol),
             force_refresh=force_refresh
         )
 
-
     except RateLimitedException as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(status_code=429, detail=str(e)) from e
     except AggregatorException as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}") from e
 
     # Ensure the articles key exists
     if "articles" not in sentiment_data:
@@ -697,45 +592,12 @@ async def get_sentiment_score(
 
     if not include_articles:
         sentiment_data["articles"] = []
-        
+
     # Construct Pydantic response
     response = SentimentResponse(**sentiment_data)
 
     logger.logMessage(f"[API] Sentiment response for {symbol}: {response}", log_type=LogType.Server)
     return response
-
-
-@app.post("/migrate")
-async def migrate_json_data(
-    request: MigrationRequest,
-    db: Session = Depends(get_db),
-    _: None = Depends(_require_admin_key),
-):
-    """
-    Migrate existing JSON news data to database.
-    
-    Expects JSON file with structure:
-    {
-        "TICKER": {
-            "sentiment": float,
-            "headlines": [...],
-            "timestamp": "ISO-8601"
-        }
-    }
-    """
-    try:
-        result = migrate_json_to_db(
-            request.json_file_path,
-            db,
-            request.backup_existing
-        )
-        return result
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="JSON file not found")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON format")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
 
 
 @app.post("/scheduler/trigger")
@@ -746,7 +608,7 @@ async def trigger_batch_processing(
     """Manually trigger batch processing of all tickers"""
     if app_state.is_processing:
         return {"status": "already_running", "message": "Batch processing already in progress"}
-    
+
     background_tasks.add_task(process_all_tickers)
     return {"status": "triggered", "message": "Batch processing started"}
 
@@ -756,7 +618,7 @@ async def get_scheduler_status():
     """Get current scheduler status"""
     if not app_state.scheduler:
         return {"status": "not_initialized"}
-    
+
     jobs = []
     for job in app_state.scheduler.get_jobs():
         jobs.append({
@@ -764,7 +626,7 @@ async def get_scheduler_status():
             "name": job.name,
             "next_run": job.next_run_time if job.next_run_time else None
         })
-    
+
     return {
         "running": app_state.scheduler.running,
         "is_processing": app_state.is_processing,
@@ -780,9 +642,9 @@ async def configure_scheduler(
     """Update scheduler configuration"""
     if not app_state.scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
-    
+
     job = app_state.scheduler.get_job("news_aggregation")
-    
+
     if config.enabled:
         if job:
             # Update existing job
@@ -804,25 +666,23 @@ async def configure_scheduler(
         if job:
             app_state.scheduler.remove_job("news_aggregation")
         message = "Scheduler disabled"
-    
+
     return {"status": "success", "message": message, "config": config}
 
 
 @app.get("/stats")
 async def get_statistics(db: Session = Depends(get_db)):
     """Get overall statistics about sentiment data"""
-    from sqlalchemy import func
-    
     total_symbols = db.query(func.count(SymbolSentiment.id)).scalar()
     avg_sentiment = db.query(func.avg(SymbolSentiment.sentiment_score)).scalar()
     total_articles = db.query(func.count(NewsArticle.id)).scalar()
-    
+
     recent_updates = db.query(SymbolSentiment).order_by(
         SymbolSentiment.last_updated.desc()
     ).limit(10).all()
-    
+
     total_option_symbols = count_option_symbols()
-    
+
     return {
         "total_symbols_tracked": total_symbols,
         "total_option_symbols": total_option_symbols,
@@ -848,7 +708,7 @@ async def list_symbols(
 ):
     """List all symbols from option-file-server's option_lifetimes table."""
     symbol_list = list_option_symbols(skip=skip, limit=limit)
-    
+
     return {
         "symbols": symbol_list,
         "count": len(symbol_list),
@@ -865,38 +725,21 @@ async def get_symbol_articles(
 ):
     """Get all stored articles for a specific symbol"""
     symbol = symbol.upper()
-    
+
     articles = db.query(NewsArticle).filter(
         NewsArticle.symbol == symbol
     ).order_by(NewsArticle.fetched_at.desc()).limit(limit).all()
-    
+
     if not articles:
         raise HTTPException(
             status_code=404,
             detail=f"No articles found for {symbol}"
         )
-    
+
     return {
         "symbol": symbol,
         "article_count": len(articles),
-        "articles": [
-            {
-                "id": a.id,
-                "source": a.source,
-                "title": a.title,
-                "description": a.description,
-                "url": a.url,
-                "published_at": (
-                    a.published_at.isoformat()
-                    if isinstance(a.published_at, datetime)
-                    else parse_datetime(a.published_at).isoformat()
-                    if a.published_at
-                    else None
-                ),
-                "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None
-            }
-            for a in articles
-        ]
+        "articles": [_article_to_dict(a, include_id=True) for a in articles]
     }
 
 
@@ -917,8 +760,6 @@ async def get_aggregate_sentiment(
     Only includes symbols that have a recorded sentiment score.
     Returns 0.0 with ticker_count=0 when no data is available.
     """
-    from sqlalchemy import func
-
     query = db.query(
         func.avg(SymbolSentiment.sentiment_score).label("avg_score"),
         func.count(SymbolSentiment.id).label("cnt"),
@@ -950,43 +791,26 @@ async def cleanup_stale_articles(
     _: None = Depends(_require_admin_key),
 ):
     """Remove articles older than specified days"""
-    from datetime import timedelta
-    
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-    
+
     deleted = db.query(NewsArticle).filter(
         NewsArticle.fetched_at < cutoff_date
     ).delete()
-    
+
     db.commit()
-    
+
     return {
         "status": "success",
         "deleted_count": deleted,
         "cutoff_date": cutoff_date.isoformat(),
         "message": f"Removed {deleted} articles older than {days} days"
     }
-    
-    
-from typing import Callable
-from sqlalchemy.orm import Session
-import asyncio
-
-async def job_wrapper(job_func, **kwargs):
-    try:
-        if asyncio.iscoroutinefunction(job_func):
-            await job_func(**kwargs)
-        else:
-            await asyncio.to_thread(job_func, **kwargs)
-    except Exception as e:
-        logger.logMessage(f"[Scheduler] Error in job {job_func.__name__}: {e}")
-
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "news_server:app",
         host="0.0.0.0",
         port=9000,
         reload=True,

@@ -4,7 +4,7 @@ News aggregator + sentiment helper.
 
 Exports:
  - aggregate_headlines_smart(ticker, ticker_name, rate_cache) -> list[Headline]
- - get_sentiment_signal(ticker, ticker_name, rate_cache) -> float  # [-1.0, 1.0]
+ - compute_headlines_sentiment(headlines) -> float  # [-1.0, 1.0]
  - Headline dataclass
 
 Design:
@@ -27,15 +27,8 @@ import re
 import feedparser
 import requests
 
-from path_bootstrap import is_schema_export
 from shared_options.log.logger_singleton import getLogger
-from services.core.cache_manager import HeadlineCache, RateLimitCache
-
-if is_schema_export():
-    def is_rate_limited(cache: RateLimitCache, key: str) -> bool:
-        return False
-else:
-    from services.utils import is_rate_limited
+from services.core.cache_manager import RateLimitCache
 
 logger = getLogger()
 
@@ -65,31 +58,9 @@ class RateLimitedException(Exception):
     """Raised when the news aggregator is rate limited"""
     pass
 
-class NoHeadlinesException(Exception):
-    """Raised when no headlines were returned"""
-    pass
 class AggregatorException(Exception):
     """Raised for general aggregator errors"""
     pass
-
-def warmup_transformer_model():
-    """
-    Load and warm up the transformer model at startup.
-    This prevents cold start delays on first request.
-    """
-    if USE_TRANSFORMERS:
-        try:
-            logger.logMessage("[Sentiment] Warming up FinBERT model...")
-            pipeline = _load_transformer_pipeline()
-            if pipeline:
-                # Run a test prediction to load model into memory
-                pipeline("Test warmup text")
-                logger.logMessage("[Sentiment] FinBERT model ready")
-            return True
-        except Exception as e:
-            logger.logMessage(f"[Sentiment] Model warmup failed: {e}")
-            return False
-    return False
 
 # -------------------------------------------------------
 # Headline model
@@ -130,7 +101,7 @@ class NewsAPIClient(NewsClientBase):
             self.logger.logMessage("[NewsAPI] API key missing; skipping NewsAPI")
             return []
 
-        if self.rate_cache is not None and is_rate_limited(self.rate_cache, "NewsAPI"):
+        if self.rate_cache is not None and self.rate_cache.is_limited("NewsAPI"):
             return []
         
         news_sources_str = "bloomberg,reuters,the-wall-street-journal,cnbc,marketwatch,the-new-york-times,financial-times,forbes,business-insider,yahoo-news"
@@ -188,7 +159,7 @@ class NewsDataClient(NewsClientBase):
             self.logger.logMessage("[NewsData] API key missing; skipping NewsData")
             return []
 
-        if self.rate_cache is not None and is_rate_limited(self.rate_cache, "NewsData"):
+        if self.rate_cache is not None and self.rate_cache.is_limited("NewsData"):
             return []
 
         categories = [
@@ -247,7 +218,7 @@ class GoogleNewsClient(NewsClientBase):
         return f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
     def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
-        if self.rate_cache is not None and is_rate_limited(self.rate_cache, "GoogleNews"):
+        if self.rate_cache is not None and self.rate_cache.is_limited("GoogleNews"):
             return []
 
         query = ticker_name or ticker
@@ -323,7 +294,7 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
             logger.logMessage(
                 f"[Aggregator] Partial failures for {ticker}: "
                 f"exceptions={[(n,type(e).__name__) for n,e in exceptions]}, "
-                f"rate_limited={rate_limited_sources}"
+                f"rate_limited={rate_limited_sources}, "
                 f"returning {len(aggregated)} headlines"
             )
         return aggregated
@@ -522,33 +493,6 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
         return 0.0
 
 
-# -------------------------------------------------------
-# Convenience: one-call sentiment getter used in scanner
-# -------------------------------------------------------
-def get_sentiment_signal(
-    ticker: str,
-    ticker_name: str = "",
-    rate_cache: RateLimitCache = None,
-    headline_cache: HeadlineCache = None,
-) -> Optional[float]:
-    """
-    Fetch headlines and compute sentiment signal.
-    Returns float in [-1,1] or None if upstream rate-limited (so caller can back off).
-    """
-    try:
-        headlines = aggregate_headlines_smart(ticker, ticker_name, rate_cache=rate_cache)
-        if headlines is None:
-            # upstream told us to back off due to rate limits
-            return None
-        if not headlines:
-            return 0.0
-        if headline_cache is not None:
-            headline_cache.add(ticker, strip_unwanted_fields(headlines))
-        return compute_headlines_sentiment(headlines)
-    except Exception as e:
-        logger.logMessage(f"[Aggregator] get_sentiment_signal error for {ticker}: {e}")
-        return 0.0
-
 def clean_description(html_text: str) -> str:
     """Remove HTML tags, decode entities, and normalize whitespace."""
     if not html_text:
@@ -561,19 +505,3 @@ def clean_description(html_text: str) -> str:
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
-
-def strip_unwanted_fields(headlines, drop_keys=None):
-    drop_keys = set(drop_keys or ["url"])
-    cleaned = []
-
-    for h in headlines:
-        if isinstance(h, dict):
-            source = h
-        else:
-            source = vars(h)  # Get object attributes
-
-        # Keep only wanted fields
-        filtered = {k: v for k, v in source.items() if k not in drop_keys}
-        cleaned.append(filtered)
-
-    return cleaned

@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -7,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import BaseModel, Field
 from database.database import Base
 from path_bootstrap import is_schema_export
-from services.core.cache_manager import RateLimitCache, HeadlineCache
+from services.core.cache_manager import RateLimitCache
 from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 
 # ===========================
@@ -16,12 +15,7 @@ from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, Un
 class AppState:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
-        if is_schema_export():
-            self.rate_cache = None
-            self.headline_cache = None
-        else:
-            self.rate_cache = RateLimitCache()
-            self.headline_cache = HeadlineCache()
+        self.rate_cache = None if is_schema_export() else RateLimitCache()
         self.is_processing = False
 
 
@@ -44,32 +38,10 @@ class SentimentResponse(BaseModel):
         }
 
 
-class MigrationRequest(BaseModel):
-    json_file_path: str = Field(..., description="Path to JSON file with news data")
-    backup_existing: bool = Field(default=True, description="Backup existing data before migration")
-
-
-class TickerRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10, description="Stock symbol")
-    symbol_name: Optional[str] = None
-    force_refresh: bool = Field(default=False, description="Force new aggregation even if cached")
-
-
 class SchedulerConfig(BaseModel):
     interval_minutes: int = Field(default=60, ge=5, le=1440)
     enabled: bool = True
 
-
-
-@dataclass
-class TickerSentiment:
-    ticker: str
-    ticker_name: Optional[str]
-    sentiment_score: float
-    headlines: str              # JSON-serialized string
-    headline_count: int
-    source_breakdown: str       # JSON-serialized string
-    last_updated: datetime
 
 class NewsArticle(Base):
     """Stores individual news articles for reference"""
@@ -103,26 +75,6 @@ class SymbolSentiment(Base):
     last_updated = Column(DateTime, default=datetime.utcnow, index=True)
     source_breakdown = Column(Text) 
 
-
-class SymbolSentimentOut(BaseModel):
-    symbol: str
-    symbol_name: Optional[str]
-    sentiment_score: float
-    article_count: int
-    source_breakdown: dict
-    last_updated: datetime
-
-    # Allow constructing from ORM objects
-    model_config = {"from_attributes": True}
-
-
-class OptionLifetime(Base):
-    """Maps to existing option_lifetimes table - read only"""
-    __tablename__ = "option_lifetimes"
-
-    osiKey = Column("osiKey", Text, primary_key=True)
-    timestamp = Column(Text, nullable=False)
-    symbol = Column(Text, nullable=False, index=True)
 
 def sentiment_to_dict(
     record: SymbolSentiment,

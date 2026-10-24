@@ -6,9 +6,9 @@ Verified against the repository implementation on 2026-07-14. This manifest summ
 
 The deployed application is `news_server:app`, served on `0.0.0.0:9000` by `main.py`. The CLI supports `--mode start-server|monitor|stop|check|stats|logs`, with an interactive menu when no mode is supplied. Process integration also includes PID files (`news_server.pid`, `news_monitor.pid`), stop flag (`news_server.stop`), monitor log (`logs/monitor/log.log`), FastAPI OpenAPI (`/openapi.json`), and Swagger UI (`/docs`).
 
-Live REST routes are: `GET /` health; `POST /sentiment/{symbol}/score`; `GET /sentiment/aggregate`; `GET /stats`; `GET /symbols`; `GET /articles/{symbol}`; `DELETE /articles/cleanup`; `POST /migrate`; and scheduler trigger/status/configure routes. See `API.md` for inputs and known route defects. Administrative/destructive routes require `X-API-Key`; read routes remain public on the trusted service network.
+Live REST routes are: `GET /` health; `POST /sentiment/{symbol}/score`; `GET /sentiment/aggregate`; `GET /stats`; `GET /symbols`; `GET /articles/{symbol}`; `DELETE /articles/cleanup`; and scheduler trigger/status/configure routes. See `API.md` for inputs and known route defects. Administrative/destructive routes require `X-API-Key`; read routes remain public on the trusted service network.
 
-`api.py` exposes no public interface at runtime: its `/api` router is never mounted. Likewise, `services/processor.py` is legacy code reached only from that unmounted router. Python-level interfaces intentionally consumed inside the service include `aggregate_headlines_smart()`, `compute_headlines_sentiment()`, `SessionLocal`/`get_db()`, cache classes, and `shared-options` logging/monitor/shutdown/ticker APIs.
+Python-level interfaces intentionally consumed inside the service include `aggregate_headlines_smart()`, `compute_headlines_sentiment()`, `SessionLocal`/`get_db()`, `RateLimitCache`, and `shared-options` logging/monitor/shutdown/ticker APIs.
 
 ## Critical external dependencies and project linkages
 
@@ -26,7 +26,7 @@ Live REST routes are: `GET /` health; `POST /sentiment/{symbol}/score`; `GET /se
 3. Provider requests/feed parsing now use bounded connect/read timeouts, but provider-wide retries and circuit-breaker cooldowns remain intentionally minimal. Repeated upstream degradation can still consume aggregation capacity until the rate-limit cache or scheduler cadence backs off.
 4. APScheduler and the processing guard are process-local. Multiple workers/replicas duplicate jobs and bypass mutual exclusion; scheduler configuration disappears on restart.
 5. APScheduler configuration remains process-local and non-persistent. Runtime reconfiguration works for the current process only and is rebuilt from environment/defaults on restart.
-6. `api.py`/`services/processor.py` duplicate live logic, and `news_server.py` itself contains route, scheduling, persistence, and business logic. This encourages documentation and implementation drift.
+6. `news_server.py` itself contains route, scheduling, persistence, and business logic. This encourages documentation and implementation drift.
 7. Relative database/cache/PID/log/backup paths require a particular working directory. `python news_server.py` also targets `main:app`, although `main.py` exports no app; the supported direct server target is `news_server:app`.
 8. Article uniqueness is `(symbol,url)`, but duplicate lookup is global by URL before inserting per-symbol records. A URL already stored for one symbol may be skipped for another, conflicting with the schema’s intended uniqueness.
 9. `from_cache` is overwritten as `not force_refresh` in the score route, so a normal cache miss can be reported as cached. Operational consumers should not treat this field as reliable until fixed.
@@ -37,7 +37,7 @@ The canonical news store is now `news-getter/database/news.db` (or `NEWS_DB_PATH
 
 Ticker sentiment is considered fresh for one hour. Per-symbol articles older than one day are deleted during refresh; the cleanup endpoint can apply another caller-selected retention. The ticker-name table refreshes at startup and every two weeks. Aggregation defaults to every 60 minutes via `AGGREGATION_INTERVAL_MINUTES`.
 
-Rate-limit and headline cache objects use memory plus JSON files under `cache/`. Rate-limit entries survive graceful shutdown; headline cache exists but is not used by the live fetch path. Scheduler jobs, `is_processing`, the DB semaphore, HTTP session, and optional model pipeline are process-local. The design assumes one service instance, a stable repository-relative directory layout, writable local disk, and trusted network access.
+The rate-limit cache uses memory plus `cache/ratelimit_sentiment.json`; its entries survive graceful shutdown. Scheduler jobs, `is_processing`, the DB semaphore, HTTP session, and optional model pipeline are process-local. The design assumes one service instance, a stable repository-relative directory layout, writable local disk, and trusted network access.
 
 ## Documentation disposition
 
