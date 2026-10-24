@@ -23,7 +23,7 @@ Additional jobs refresh ticker metadata every two weeks and evict expired rate-l
 |---|---|---|
 | News SQLite data | `database/news.db` by default; override with `NEWS_DB_PATH` | `news-getter` is the only writer for `news_articles`, `symbol_sentiment`, `tickers`, and `news_migrations`. Startup can copy legacy rows from the old shared DB once when the news DB is empty; disable with `NEWS_IMPORT_LEGACY_ON_INIT=false`. |
 | Upstream options symbols | `../option-file-server/database/options.db` by default; override with `NEWS_OPTIONS_DB_PATH` | Opened read-only for `option_lifetimes` symbol discovery and stats. News writes no longer share `options.db`'s SQLite writer lock. |
-| Rate-limit cache | `cache/ratelimit_sentiment.json` plus memory; one-day TTL | Loaded at module import and written on registered shutdown; scheduled eviction changes memory but is not itself an autosave loop. |
+| Rate-limit cache | memory, plus `cache/ratelimit_sentiment.json`; one-day TTL | Loaded at module import. The file is written only by a registered shutdown callback, and news-getter never fires shutdown callbacks, so in practice back-offs live in memory and a restart forgets them. Scheduled eviction changes memory only. |
 | Scheduler/processing flag/model | Process memory | Lost on restart and not coordinated between multiple Uvicorn workers/instances. The deployment assumes one application process. |
 | Process control | `news_server.pid`, `news_monitor.pid`, `news_server.stop`, `logs/monitor/log.log` | Paths are relative to the working directory; monitor logs rotate daily with seven-day retention. |
 
@@ -35,7 +35,7 @@ Additional jobs refresh ticker metadata every two weeks and evict expired rate-l
 
 ## Failure behavior and known debt
 
-- Individual news-provider errors generally degrade to fewer/no headlines; provider 429 state is cached. Optional transformer failure permanently falls back to heuristic scoring for that process.
+- Individual news-provider errors generally degrade to fewer/no headlines; provider 429 state is cached in memory. When every provider comes back empty or skipped, the ticker's stored score is overwritten with a neutral 0.0 rather than kept. Optional transformer failure permanently falls back to heuristic scoring for that process.
 - Provider HTTP/RSS calls use explicit connect/read timeouts (`NEWS_HTTP_CONNECT_TIMEOUT_SECONDS`, default 3s; `NEWS_HTTP_READ_TIMEOUT_SECONDS`, default 10s). A single stalled provider should degrade a ticker result instead of indefinitely occupying one of the four aggregation slots.
 - Scheduler jobs run in-process. Multiple server instances would duplicate ticker refresh and aggregation, while the boolean processing guard is not distributed.
 - PID files, cache files and logs depend on the launch working directory; database paths are now resolved from the module path unless overridden.

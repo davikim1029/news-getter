@@ -1,3 +1,12 @@
+"""Database connections for news-getter.
+
+Two SQLite files are involved:
+  * news.db    - owned and written by this service (articles, scores, ticker names).
+  * options.db - owned by option-file-server. Opened read-only here, only to learn which
+                 tickers have options worth scoring (its `option_lifetimes` table).
+
+Both paths can be overridden with NEWS_DB_PATH and NEWS_OPTIONS_DB_PATH.
+"""
 import os
 import sqlite3
 from pathlib import Path
@@ -24,7 +33,9 @@ DATABASE_URL = f"sqlite:///{NEWS_DB_PATH}"
 # SQLite-specific engine configuration
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},  # Needed for SQLite
+    # SQLite refuses by default to share a connection across threads; the async
+    # routes and worker threads here do share pooled connections.
+    connect_args={"check_same_thread": False},
     pool_pre_ping=True
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -33,7 +44,7 @@ Base = declarative_base()
 # ===========================
 
 def init_database():
-    """Initialize news-getter-owned schema via versioned migrations."""
+    """Create or upgrade news.db's tables, then do the one-time legacy import if it is due."""
     from database.migrations import run_migrations
     run_migrations(str(NEWS_DB_PATH))
     _import_legacy_news_tables_if_needed()
@@ -43,6 +54,7 @@ def init_database():
 
 
 def _table_count(conn: sqlite3.Connection, table: str) -> int:
+    """Row count of `table`, or 0 if the table doesn't exist."""
     try:
         return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     except sqlite3.Error:
@@ -50,11 +62,12 @@ def _table_count(conn: sqlite3.Connection, table: str) -> int:
 
 
 def _import_legacy_news_tables_if_needed() -> None:
-    """One-time bootstrap from legacy news tables previously stored in options.db.
+    """Copy news rows from options.db into an empty news.db, once.
 
-    DATA-02 moved the writable news-owned tables out of option-file-server's
-    ``options.db``. To make the cutover operationally boring, startup copies
-    legacy rows only when the new news DB is empty. Disable with
+    These tables used to live inside option-file-server's options.db, where every news
+    write competed for that database's single writer lock (DATA-02). They now live in
+    news.db. So that a host can switch over without a manual step, startup copies the
+    old rows across, but only while news.db is still empty. Disable with
     ``NEWS_IMPORT_LEGACY_ON_INIT=false``.
     """
     if os.getenv("NEWS_IMPORT_LEGACY_ON_INIT", "true").strip().lower() in {"0", "false", "no"}:
@@ -68,6 +81,8 @@ def _import_legacy_news_tables_if_needed() -> None:
     try:
         if _table_count(conn, "news_articles") or _table_count(conn, "symbol_sentiment"):
             return
+        # ATTACH makes options.db's tables addressable as `legacy.<table>` on this
+        # connection, so each copy is a single INSERT ... SELECT.
         conn.execute("ATTACH DATABASE ? AS legacy", (str(options_path),))
         legacy_tables = {
             row[0]
@@ -117,7 +132,11 @@ def _import_legacy_news_tables_if_needed() -> None:
 
 
 def list_option_symbols(*, skip: int = 0, limit: int | None = None) -> list[str]:
-    """Read distinct option symbols from option-file-server's DB without writing to it."""
+    """Distinct tickers that have option history in options.db, alphabetically; [] if unreadable.
+
+    `skip`/`limit` page through the list. The connection is opened read-only
+    (`mode=ro`), so this can never write to option-file-server's database.
+    """
     if not OPTIONS_DB_PATH.exists():
         logger.logMessage(f"[DB] options DB not found for symbol discovery: {OPTIONS_DB_PATH}")
         return []
@@ -137,7 +156,7 @@ def list_option_symbols(*, skip: int = 0, limit: int | None = None) -> list[str]
 
 
 def count_option_symbols() -> int:
-    """Return the distinct option symbol count from the read-only upstream options DB."""
+    """How many distinct tickers have option history in options.db; 0 if unreadable."""
     if not OPTIONS_DB_PATH.exists():
         return 0
     conn = sqlite3.connect(f"file:{OPTIONS_DB_PATH}?mode=ro", uri=True, timeout=30)
@@ -156,7 +175,7 @@ def count_option_symbols() -> int:
 # Dependency Injection
 # ===========================
 def get_db():
-    """Database session dependency"""
+    """FastAPI dependency: one news.db session per request, closed when the request ends."""
     db = SessionLocal()
     try:
         yield db

@@ -37,7 +37,7 @@ The canonical news store is now `news-getter/database/news.db` (or `NEWS_DB_PATH
 
 Ticker sentiment is considered fresh for one hour. Per-symbol articles older than one day are deleted during refresh; the cleanup endpoint can apply another caller-selected retention. The ticker-name table refreshes at startup and every two weeks. Aggregation defaults to every 60 minutes via `AGGREGATION_INTERVAL_MINUTES`.
 
-The rate-limit cache uses memory plus `cache/ratelimit_sentiment.json`; its entries survive graceful shutdown. Scheduler jobs, `is_processing`, the DB semaphore, HTTP session, and optional model pipeline are process-local. The design assumes one service instance, a stable repository-relative directory layout, writable local disk, and trusted network access.
+The rate-limit cache lives in memory; `cache/ratelimit_sentiment.json` is loaded at startup but, because no shutdown callback ever fires, never written, so back-offs do not survive a restart. Scheduler jobs, `is_processing`, the DB semaphore, HTTP session, and optional model pipeline are process-local. The design assumes one service instance, a stable repository-relative directory layout, writable local disk, and trusted network access.
 
 ## Documentation disposition
 

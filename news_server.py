@@ -1,10 +1,14 @@
-# news_server.py
-"""
-FastAPI News Aggregator Service
+"""The news-getter web service: keeps a news sentiment score for every ticker the scanner trades.
 
-Features:
-1. Background task scheduler for automated news aggregation
-2. REST API for on-demand news retrieval
+Every hour (AGGREGATION_INTERVAL_MINUTES), a background job takes each ticker that has
+option history in option-file-server's database, fetches its recent headlines, stores
+them, and saves a score from -1 (bad news) to 1 (good news). The scanner (option-getter)
+reads these scores through GET /sentiment/aggregate, for market and sector mood, and
+POST /sentiment/{symbol}/score, for one ticker. Other routes inspect stored data or
+control the schedule.
+
+uvicorn runs this as `news_server:app`; main.py starts it. Routes that change or delete
+data require an X-API-Key header; read routes are open to the private network.
 """
 
 from path_bootstrap import ensure_shared_options_path
@@ -60,7 +64,9 @@ logger = getLogger()
 
 app_state = AppState()
 
-BATCH_SIZE = 20  # process 20 tickers concurrently
+# An all-tickers run starts 20 tickers at a time, but at most 4 fetch-and-store at once,
+# which bounds both concurrent provider requests and concurrent SQLite writers.
+BATCH_SIZE = 20
 DB_CONCURRENCY_LIMIT = 4
 db_semaphore = asyncio.Semaphore(DB_CONCURRENCY_LIMIT)
 
@@ -73,6 +79,7 @@ def _is_production() -> bool:
 
 
 def _accepted_admin_keys() -> list[str]:
+    """API keys that unlock admin routes: NEWS_ADMIN_API_KEY, else ANALYSIS_API_KEY (each with its rotation predecessor)."""
     keys = accepted_secrets("NEWS_ADMIN_API_KEY")
     if not keys:
         keys = accepted_secrets("ANALYSIS_API_KEY")
@@ -80,15 +87,18 @@ def _accepted_admin_keys() -> list[str]:
 
 
 def _require_admin_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    """FastAPI dependency: reject the request with 401 unless X-API-Key is an accepted key."""
     accepted = _accepted_admin_keys()
     if not accepted:
-        # Preserve dev-mode behavior unless APP_ENV=production.
+        # No key configured: development mode, so admin routes stay open. Production
+        # can't reach this, because startup refuses to run without a key.
         return
     if not is_one_of(x_api_key, accepted):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
 def _require_production_auth_config() -> None:
+    """Refuse to start in production (APP_ENV=production) when no admin key is configured."""
     if _is_production() and not _accepted_admin_keys():
         raise RuntimeError(
             "Production news-getter requires NEWS_ADMIN_API_KEY or ANALYSIS_API_KEY"
@@ -97,6 +107,7 @@ def _require_production_auth_config() -> None:
 
 @contextmanager
 def db_session():
+    """A news.db session for code outside a request (the scheduler); always closed afterwards."""
     db = SessionLocal()
     try:
         yield db
@@ -105,12 +116,14 @@ def db_session():
 
 
 def _published_iso(value) -> str | None:
+    """A publish date, in whatever format the provider used, as an ISO string (None if absent)."""
     if isinstance(value, datetime):
         return value.isoformat()
     return parse_datetime(value).isoformat() if value else None
 
 
 def _article_to_dict(article: NewsArticle, include_id: bool = False) -> dict:
+    """A stored article as the JSON shape the API returns."""
     row = {
         "source": article.source,
         "title": article.title,
@@ -123,6 +136,7 @@ def _article_to_dict(article: NewsArticle, include_id: bool = False) -> dict:
 
 
 def load_symbol_map(db: Session) -> Dict[str, str]:
+    """Every known ticker mapped to its company name, from the `tickers` table."""
     result = db.execute(
         text("SELECT symbol, name FROM tickers")
     )
@@ -130,6 +144,7 @@ def load_symbol_map(db: Session) -> Dict[str, str]:
 
 
 def _symbol_name(db: Session, symbol: str) -> str | None:
+    """The company name for one ticker, or None if it isn't in the `tickers` table."""
     return db.execute(
         text("SELECT name FROM tickers WHERE symbol = :symbol"), {"symbol": symbol}
     ).scalar()
@@ -143,6 +158,17 @@ async def aggregate_and_store_ticker(
     ticker_name: str | None,
     force_refresh: bool = False,
 ) -> dict:
+    """
+    Return a ticker's sentiment, recomputing it from fresh headlines when needed.
+
+    A score less than an hour old is returned as is, unless `force_refresh`. Otherwise:
+    fetch headlines, store the new ones, score them, and save the score. Returns a dict
+    shaped like SentimentResponse. Raises RateLimitedException or AggregatorException
+    when no headlines could be fetched at all.
+
+    Providers are searched by `ticker_name` (the company name) when one is known; a bare
+    ticker such as "ON" or "ALL" would also match ordinary words.
+    """
     ticker = ticker.upper()
 
     try:
@@ -218,7 +244,8 @@ async def aggregate_and_store_ticker(
             if deleted:
                 logger.logMessage(f"[DB] Removed {deleted} stale articles for {ticker}")
 
-            # Bulk-fetch all existing URLs for this ticker — one query instead of N
+            # Find which incoming URLs are already stored, in one query instead of one per
+        # headline. (Matches across all tickers, not just this one: NEWSGET-01.)
             incoming_urls = {h.url for h in headlines if h.url}
             existing_urls: set[str] = set()
             if incoming_urls:
@@ -228,13 +255,14 @@ async def aggregate_and_store_ticker(
                     .filter(NewsArticle.url.in_(incoming_urls))
                     .all()
                 }
-                # Touch fetched_at for duplicates in one update
+                # Seen again today: refresh fetched_at so the 1-day purge above keeps them.
                 stale_urls = incoming_urls & existing_urls
                 if stale_urls:
                     db.query(NewsArticle).filter(
                         NewsArticle.url.in_(stale_urls)
                     ).update({"fetched_at": now}, synchronize_session=False)
 
+            # Insert only articles we haven't stored, and collect the same rows for the response.
             articles_data = []
             for h in headlines:
                 if h.url and h.url in existing_urls:
@@ -271,7 +299,7 @@ async def aggregate_and_store_ticker(
         )
 
         # ============================
-        # 5. Source breakdown
+        # 5. Source breakdown: headline count per provider
         # ============================
         source_breakdown: dict[str, int] = {}
         for h in headlines:
@@ -328,6 +356,13 @@ async def aggregate_and_store_ticker(
 
 
 async def process_all_tickers():
+    """
+    Refresh the sentiment of every ticker with option history. The hourly scheduled job.
+
+    Runs in batches of BATCH_SIZE and publishes progress to MonitorStatus, which
+    process-monitor and the iOS app display. Skips if a run is already in progress.
+    One ticker's failure doesn't stop the run.
+    """
     if app_state.is_processing:
         logger.logMessage("[Scheduler] Already processing, skipping...")
         return
@@ -344,6 +379,7 @@ async def process_all_tickers():
     ms = MonitorStatus.instance()
     total = len(unique_symbols)
     num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    # Read the running totals and bump the cycle count in one locked step.
     with ms._lock:
         cycles = ms._data["counters"].get("Cycles", 0) + 1
         total_processed_so_far = ms._data["counters"].get("Tickers Processed", 0)
@@ -364,6 +400,8 @@ async def process_all_tickers():
                 for symbol in batch
             ]
 
+            # return_exceptions: a failed ticker becomes a result value instead of
+            # cancelling the rest of the batch. Its error was already logged.
             await asyncio.gather(*tasks, return_exceptions=True)
             done += len(batch)
             ms.set_progress(done, total, "tickers")
@@ -378,6 +416,7 @@ async def process_all_tickers():
 
 
 async def process_single_ticker(symbol: str, ticker_name: Optional[str]):
+    """Refresh one ticker, waiting for one of the DB_CONCURRENCY_LIMIT slots first."""
     async with db_semaphore:
         return await aggregate_and_store_ticker(
             ticker=symbol,
@@ -389,6 +428,7 @@ async def process_single_ticker(symbol: str, ticker_name: Optional[str]):
 # Scheduler Setup
 # ===========================
 async def job_wrapper(job_func, **kwargs):
+    """Run a scheduled job (async or not) and log any error instead of letting it escape."""
     try:
         if asyncio.iscoroutinefunction(job_func):
             await job_func(**kwargs)
@@ -399,6 +439,7 @@ async def job_wrapper(job_func, **kwargs):
 
 
 async def _evict_caches():
+    """Scheduled every 30 minutes: drop rate-limit back-offs that have expired."""
     if app_state.rate_cache:
         n = app_state.rate_cache.evict_expired()
         if n:
@@ -406,7 +447,11 @@ async def _evict_caches():
 
 
 async def save_tickers_to_db(db: Session = None):
-    """Fetch and save US tickers to the database"""
+    """Add newly listed US tickers (symbol and company name) from Finnhub to the `tickers` table.
+
+    Existing rows are left alone, so a company that changes its name keeps the old one.
+    Closes `db` when done. Errors are logged, not raised.
+    """
 
     logger.logMessage("[Tickers] Fetching and saving US tickers to database...")
     from shared_options.models.tickers import fetch_us_tickers_from_finnhub
@@ -444,7 +489,7 @@ async def save_tickers_to_db(db: Session = None):
 
 
 async def start_scheduler():
-    """Initialize and start the background scheduler"""
+    """Load ticker names once, then start the three repeating jobs: sentiment, ticker names, cache eviction."""
     app_state.scheduler = AsyncIOScheduler()
 
     # Default: run every 60 minutes
@@ -460,7 +505,7 @@ async def start_scheduler():
         id="news_aggregation",
         name="Aggregate news for all tickers",
         replace_existing=True,
-        kwargs={"job_func": process_all_tickers}  # job_wrapper now calls this
+        kwargs={"job_func": process_all_tickers}
     )
 
     app_state.scheduler.add_job(
@@ -486,7 +531,7 @@ async def start_scheduler():
 
 
 async def stop_scheduler():
-    """Shutdown the scheduler gracefully"""
+    """Stop the scheduler (called on shutdown)."""
     if app_state.scheduler:
         app_state.scheduler.shutdown()
         logger.logMessage("[Scheduler] Stopped")
@@ -497,10 +542,12 @@ async def stop_scheduler():
 # ===========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle"""
+    """Everything that happens when the server starts, and again when it stops (after `yield`)."""
     # Startup
     from dotenv import load_dotenv
     load_dotenv(override=True)  # reads .env into os.environ
+    # Point the key checks at the .env file itself, so a rotated API key takes effect
+    # without a restart.
     register_env_path(os.path.join(os.path.dirname(__file__), ".env"))
     _require_production_auth_config()
 
@@ -511,7 +558,8 @@ async def lifespan(app: FastAPI):
     # Initialize database (create tables if needed)
     init_database()
 
-    # Warm up transformer model if enabled
+    # Load FinBERT now rather than on first use, which would otherwise stall for the
+    # model download and load.
     if os.getenv("USE_TRANSFORMERS", "false").lower() == "true":
         logger.logMessage("[App] Initializing FinBERT model...")
         from services.news_aggregator import _load_transformer_pipeline
@@ -545,7 +593,7 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
+    """Health check: is the server up, is the scheduler running, is a run in progress."""
     return {
         "status": "running",
         "service": "News Aggregator API",
@@ -562,14 +610,14 @@ async def get_sentiment_score(
     db: Session = Depends(get_db)
 ):
     """
-    Fetch sentiment for a given ticker symbol.
-    Returns cached data if available and not force_refresh.
-    Includes the last 50 articles.
+    Sentiment for one ticker, refreshed from the news if the stored score is over an hour old.
+
+    Articles are included only when `include_articles=true` (up to 50). Upstream rate
+    limiting answers 429, and every provider failing answers 502.
     """
     symbol = symbol.upper()
 
     try:
-        # aggregate_and_store_ticker now returns a dict compatible with SentimentResponse
         sentiment_data = await aggregate_and_store_ticker(
             ticker=symbol,
             ticker_name=_symbol_name(db, symbol),
@@ -587,7 +635,7 @@ async def get_sentiment_score(
     if "articles" not in sentiment_data:
         sentiment_data["articles"] = []
 
-    # Set from_cache properly
+    # Overwrites the accurate value set above, so a cache miss reports true (NEWSGET-01).
     sentiment_data["from_cache"] = not force_refresh
 
     if not include_articles:
@@ -605,7 +653,7 @@ async def trigger_batch_processing(
     background_tasks: BackgroundTasks,
     _: None = Depends(_require_admin_key),
 ):
-    """Manually trigger batch processing of all tickers"""
+    """Start an all-tickers refresh now, in the background (unless one is already running)."""
     if app_state.is_processing:
         return {"status": "already_running", "message": "Batch processing already in progress"}
 
@@ -615,7 +663,7 @@ async def trigger_batch_processing(
 
 @app.get("/scheduler/status")
 async def get_scheduler_status():
-    """Get current scheduler status"""
+    """Whether the scheduler is running, and each job with its next run time."""
     if not app_state.scheduler:
         return {"status": "not_initialized"}
 
@@ -639,7 +687,7 @@ async def configure_scheduler(
     config: SchedulerConfig,
     _: None = Depends(_require_admin_key),
 ):
-    """Update scheduler configuration"""
+    """Change how often the all-tickers refresh runs, or turn it off. Not kept across restarts."""
     if not app_state.scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
@@ -672,7 +720,7 @@ async def configure_scheduler(
 
 @app.get("/stats")
 async def get_statistics(db: Session = Depends(get_db)):
-    """Get overall statistics about sentiment data"""
+    """Counts and averages over the stored data, plus the ten most recently scored tickers."""
     total_symbols = db.query(func.count(SymbolSentiment.id)).scalar()
     avg_sentiment = db.query(func.avg(SymbolSentiment.sentiment_score)).scalar()
     total_articles = db.query(func.count(NewsArticle.id)).scalar()
@@ -706,7 +754,7 @@ async def list_symbols(
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """List all symbols from option-file-server's option_lifetimes table."""
+    """One page of the tickers that have option history in option-file-server's database."""
     symbol_list = list_option_symbols(skip=skip, limit=limit)
 
     return {
@@ -723,7 +771,7 @@ async def get_symbol_articles(
     limit: int = 50,
     db: Session = Depends(get_db)
 ):
-    """Get all stored articles for a specific symbol"""
+    """The most recently fetched stored articles for one ticker; 404 if there are none."""
     symbol = symbol.upper()
 
     articles = db.query(NewsArticle).filter(
@@ -790,7 +838,7 @@ async def cleanup_stale_articles(
     db: Session = Depends(get_db),
     _: None = Depends(_require_admin_key),
 ):
-    """Remove articles older than specified days"""
+    """Delete stored articles, for every ticker, fetched more than `days` days ago."""
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
     deleted = db.query(NewsArticle).filter(

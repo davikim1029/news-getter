@@ -1,3 +1,10 @@
+"""Creates and upgrades news.db's tables, one numbered step ("migration") at a time.
+
+Each step runs once per database: the numbers already applied are recorded in a
+bookkeeping table, so `run_migrations()` is safe to call on every startup. To change the
+schema, append a new numbered function to `_MIGRATIONS`; never edit one that has shipped,
+because databases that already ran it will not run it again.
+"""
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -6,8 +13,8 @@ from shared_options.log.logger_singleton import getLogger
 
 logger = getLogger()
 
-# Uses a separate table from option-file-server's `schema_migrations` since both
-# services write to the same shared database and need isolated version namespaces.
+# Named apart from option-file-server's `schema_migrations` because these tables used to
+# live in its options.db, where the two version histories had to share one database.
 _MIGRATION_TABLE = "news_migrations"
 
 
@@ -65,7 +72,12 @@ _MIGRATIONS = [
 
 
 def run_migrations(db_path: str):
-    """Apply all pending news-getter schema migrations. Safe to call on every startup."""
+    """Apply every migration this database hasn't run yet. Safe to call on every startup.
+
+    Also switches the database to WAL mode, which lets readers keep reading while a
+    write is in progress. A failing migration is rolled back and re-raised, so the
+    service refuses to start on a half-upgraded schema.
+    """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(db_path, timeout=30)
@@ -81,6 +93,8 @@ def run_migrations(db_path: str):
         """)
         conn.commit()
 
+        # Each migration runs in its own write transaction, together with the row that
+        # records it, so a step is either fully applied and recorded or not at all.
         for version, fn in _MIGRATIONS:
             try:
                 conn.execute("BEGIN IMMEDIATE")

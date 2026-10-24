@@ -1,8 +1,13 @@
-#main.py
-"""
-News Aggregator Server Manager
+"""Command-line control for the news-getter server: start, stop, watch and inspect it.
 
-Manages the FastAPI news aggregator service with start/stop/monitor capabilities.
+The server itself is `news_server.py`, run by uvicorn in a separate process. process-monitor
+(this monorepo's supervisor) calls `--mode start-server` to launch it in the background and
+`--mode stop` to end it. `--mode monitor` runs in the foreground and restarts the server
+whenever it dies, for use without process-monitor. With no `--mode`, an interactive menu
+opens.
+
+The PID file, stop flag and log path are relative to the working directory, so run this
+from the news-getter folder.
 """
 
 try:
@@ -24,24 +29,27 @@ import psutil
 from datetime import datetime
 import argparse
 from collections import deque
-logger = None
+logger = None  # set by _init_logger() once a mode has been chosen
 
 # -----------------------------
 # Paths & Constants
 # -----------------------------
 PORT = 9000
-PID_FILE = Path("news_server.pid")
-STOP_FLAG = Path("news_server.stop")
-MONITOR_PID_FILE = Path("news_monitor.pid")
+PID_FILE = Path("news_server.pid")            # uvicorn's PID; process-monitor reads it too
+STOP_FLAG = Path("news_server.stop")          # present = "stay stopped", checked by monitor mode
+MONITOR_PID_FILE = Path("news_monitor.pid")   # PID of a running --mode monitor loop
 APP_NAME = "news_server:app"
 APP_NAME_FRAGMENT = "news_server"
 LOG_FILE = Path("logs/monitor/log.log")
 
 
 def _rotate_log(log_path: Path, max_days: int = 7) -> None:
-    """Rotate log_path if last modified on a previous calendar day.
-    Rotated files are named <log_path>.YYYY-MM-DD. Files older than
-    max_days are purged."""
+    """Start a fresh log each day and delete old ones.
+
+    If `log_path` was last written on an earlier day, it is renamed to
+    `<log_path>.YYYY-MM-DD`; rotated files older than `max_days` are deleted. Every step
+    is best-effort, because a logging problem must never stop the server starting.
+    """
     if not log_path.exists():
         return
     try:
@@ -78,12 +86,13 @@ UVICORN_CMD = [
 ]
 
 RESTART_DELAY = 2  # seconds before auto-restart if crashed
-HEARTBEAT = 600  # 10 minutes between health checks
+HEARTBEAT = 600  # monitor mode: seconds between "is it still up?" checks
 
 server_start_time = None
 
 
 def _init_logger():
+    """Create the shared logger the first time it is needed."""
     global logger
     if logger is not None:
         return
@@ -94,12 +103,10 @@ def _init_logger():
 # Helper Functions
 # -----------------------------
 def is_server_running():
-    """Check if *this* server process is running — PID identity, then the port."""
-    # PIDLOOP-01 (2026-09-19): a bare os.kill(pid, 0) here answers "some process holds
-    # that number", not "my service is running". After a reboot PID numbers are reused,
-    # and option-file-server spent hours refusing to start because its stale pid file
-    # named 397, which had become news-getter's uvicorn. Identity + port fallback, from
-    # the single shared implementation.
+    """True if this service's server is running: its PID is alive and is uvicorn, or port 9000 is taken."""
+    # A live PID alone isn't proof: after a reboot PID numbers are reused, so a stale PID
+    # file can name an unrelated process. The shared helper checks the process's command
+    # line too, and falls back to "is the port taken?" (PIDLOOP-01).
     from shared_options.services import pid_guard
 
     return pid_guard.service_is_running(
@@ -110,7 +117,7 @@ def is_server_running():
 
 
 def get_process_using_port(port: int):
-    """Find process using specified port"""
+    """The process listening on `port`, or None if there is none or we may not inspect it."""
     try:
         conns = psutil.net_connections(kind="inet")
     except (psutil.AccessDenied, PermissionError, OSError) as exc:
@@ -134,7 +141,7 @@ def get_process_using_port(port: int):
 
 
 def kill_process_using_port(port: int):
-    """Kill process using specified port"""
+    """Terminate whatever listens on `port` (force-kill after 3 s). True if something was found."""
     proc = get_process_using_port(port)
     if not proc:
         return False
@@ -149,7 +156,11 @@ def kill_process_using_port(port: int):
 
 
 def kill_processes_by_name(name_fragment: str):
-    """Kill processes where cmdline contains name_fragment"""
+    """Terminate every process whose command line contains `name_fragment`; return how many.
+
+    Broad on purpose, to catch orphaned servers, but it also matches any other process
+    whose arguments mention the fragment (for example an editor opened on news_server.py).
+    """
     killed = 0
     try:
         processes = psutil.process_iter(['pid', 'name', 'cmdline'])
@@ -171,7 +182,7 @@ def kill_processes_by_name(name_fragment: str):
 
 
 def cleanup_previous_instance():
-    """Clean up any previous server instances"""
+    """Kill every leftover copy of the server before a fresh start, so the port is free."""
     # 1: Kill anything using port
     kill_process_using_port(PORT)
 
@@ -191,7 +202,7 @@ def cleanup_previous_instance():
 
 
 def start_server():
-    """Start the news aggregator server"""
+    """Launch uvicorn in the background, record its PID, and return immediately."""
     global server_start_time
 
     if is_server_running():
@@ -214,6 +225,8 @@ def start_server():
     print(f"Starting news aggregator server on port {PORT}...")
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     _rotate_log(LOG_FILE)
+    # start_new_session puts uvicorn in its own process group, so it outlives this
+    # command and stop_server() can kill the whole group at once.
     with LOG_FILE.open("a") as log_file:
         process = subprocess.Popen(
             UVICORN_CMD,
@@ -232,7 +245,7 @@ def start_server():
 
 
 def stop_server():
-    """Stop the news aggregator server"""
+    """Stop the server (and any monitor loop, so it can't restart it). SIGTERM first, then SIGKILL."""
     STOP_FLAG.write_text("1")
 
     # Kill the monitor process directly so it can't restart the server
@@ -275,7 +288,7 @@ def stop_server():
 
 
 def check_server():
-    """Check server status"""
+    """Print whether the server is running, with its PID, CPU and memory use."""
     if is_server_running():
         pid = int(PID_FILE.read_text())
         proc = psutil.Process(pid)
@@ -292,7 +305,10 @@ def check_server():
 
 
 def monitor_loop():
-    """Continuously monitor the server and restart if it crashes"""
+    """Run the server in the foreground and restart it whenever it exits, until told to stop.
+
+    Exits when the stop flag appears (written by `--mode stop`), on SIGTERM, or on Ctrl+C.
+    """
     global server_start_time
 
     if STOP_FLAG.exists():
@@ -302,6 +318,7 @@ def monitor_loop():
     _proc = [None]  # mutable ref to current child process for signal handler
 
     def _on_sigterm(signum, frame):
+        """Stop the child server too, then exit."""
         logger.logMessage("Monitor received SIGTERM, shutting down.")
         STOP_FLAG.write_text("1")
         if _proc[0] is not None:
@@ -325,6 +342,8 @@ def monitor_loop():
                     logger.logMessage("Stop flag detected. Monitor exiting cleanly.")
                     break
 
+                # Already up (perhaps started elsewhere): wait out one heartbeat in
+                # 5-second steps so a stop request is noticed quickly.
                 if is_server_running():
                     for _ in range(HEARTBEAT // 5):
                         if STOP_FLAG.exists():
@@ -356,6 +375,7 @@ def monitor_loop():
                     _proc[0] = process
                     PID_FILE.write_text(str(process.pid))
                     print(f"Restarted with PID {process.pid}")
+                    # Block here until the server exits, checking for a stop request.
                     while process.poll() is None:
                         if STOP_FLAG.exists():
                             try:
@@ -381,7 +401,7 @@ def monitor_loop():
 
 
 def tail_log(file_path: Path, n: int = 20):
-    """Show last N lines of log file"""
+    """Print the last `n` lines of `file_path`."""
     if not file_path.exists():
         print(f"Log file not found: {file_path}")
         return
@@ -396,7 +416,7 @@ def tail_log(file_path: Path, n: int = 20):
 
 
 def stats():
-    """Show server statistics"""
+    """Print the running server's GET /stats summary."""
     if not is_server_running():
         print("Server is not running.")
         return
@@ -422,7 +442,7 @@ def stats():
 
 
 def get_mode_from_prompt():
-    """Interactive mode selection"""
+    """Show the menu until the user picks a mode (by number or name); return its name."""
     modes = [
         ("start-server", "Start server in background (detached) [recommended for process monitor]"),
         ("monitor", "Run in foreground — starts server and auto-restarts on crash (standalone use)"),
@@ -467,6 +487,7 @@ def get_mode_from_prompt():
 # Main Entry Point
 # -----------------------------
 def main():
+    """Run the mode given by --mode once, or loop on the interactive menu."""
     parser = argparse.ArgumentParser(description="News Aggregator Server Manager")
     parser.add_argument("--mode", help="Mode to run: start-server, monitor, stop, check, stats, logs")
     parser.add_argument("--lines", type=int, default=20, help="Number of log lines to show")

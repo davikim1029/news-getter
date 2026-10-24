@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Run once on any new machine to install UV and sync this service's dependencies.
+# Prepares news-getter to run on a new machine: installs uv (the Python package manager
+# this repo uses) if missing, checks that the shared library checkout ../options-shared
+# exists, installs this service's dependencies into .venv, and confirms the shared
+# library imports. Safe to re-run; it changes nothing that is already in place.
 
 set -euo pipefail
 

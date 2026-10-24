@@ -1,3 +1,9 @@
+"""Data shapes used by news-getter: process state, API request/response models, and DB tables.
+
+The two SQLAlchemy tables (`news_articles`, `symbol_sentiment`) are only *mapped* here so the
+code can query them. They are created and changed by `database/migrations.py`, so adding a
+column here alone does not add it to the database.
+"""
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -13,9 +19,13 @@ from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, Un
 # Global State
 # ===========================
 class AppState:
+    """Process-wide state shared by the scheduler and the API routes (one instance, in news_server.py)."""
+
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
+        # Skipped during a schema export so importing the app creates no cache file.
         self.rate_cache = None if is_schema_export() else RateLimitCache()
+        # True while a full all-tickers run is in progress; stops two runs overlapping.
         self.is_processing = False
 
 
@@ -23,6 +33,8 @@ class AppState:
 # Pydantic Models
 # ===========================
 class SentimentResponse(BaseModel):
+    """Response body of POST /sentiment/{symbol}/score."""
+
     symbol: str
     symbol_name: Optional[str]
     sentiment_score: float
@@ -39,12 +51,14 @@ class SentimentResponse(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
+    """Request body of POST /scheduler/configure: how often the all-tickers run repeats."""
+
     interval_minutes: int = Field(default=60, ge=5, le=1440)
     enabled: bool = True
 
 
 class NewsArticle(Base):
-    """Stores individual news articles for reference"""
+    """One fetched headline for one ticker. Rows older than a day are purged on that ticker's next fetch."""
     __tablename__ = "news_articles"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -53,7 +67,7 @@ class NewsArticle(Base):
     title = Column(Text, nullable=False)
     description = Column(Text)
     url = Column(Text)
-    published_at = Column(String(50))  # Store as ISO string
+    published_at = Column(String(50))  # as the provider sent it: ISO for NewsAPI, RFC 822 for Google
     fetched_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     # Prevent duplicate articles by URL per symbol
@@ -64,7 +78,7 @@ class NewsArticle(Base):
 
 
 class SymbolSentiment(Base):
-    """Stores computed sentiment scores for symbols"""
+    """The latest sentiment score for one ticker, overwritten on every successful fetch."""
     __tablename__ = "symbol_sentiment"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -73,7 +87,7 @@ class SymbolSentiment(Base):
     sentiment_score = Column(Float)
     article_count = Column(Integer)
     last_updated = Column(DateTime, default=datetime.utcnow, index=True)
-    source_breakdown = Column(Text) 
+    source_breakdown = Column(Text)  # JSON object: provider name -> headline count
 
 
 def sentiment_to_dict(
@@ -82,21 +96,10 @@ def sentiment_to_dict(
     from_cache: bool = True
 ) -> dict:
     """
-    Convert SymbolSentiment ORM object to dict compatible with SentimentResponse.
+    Turn a SymbolSentiment row into a dict with SentimentResponse's fields.
 
-    Parameters
-    ----------
-    record : SymbolSentiment
-        The ORM object from the database.
-    articles : Optional[List[Dict[str, Any]]]
-        Pre-fetched list of article dicts. Defaults to empty list.
-    from_cache : bool
-        Whether this data came from cache. Defaults to True.
-
-    Returns
-    -------
-    dict
-        Fully JSON-serializable dict for Pydantic response.
+    `articles` is attached as given (empty if omitted); missing numbers become 0 and a
+    missing timestamp becomes "now".
     """
     return {
         "symbol": record.symbol,
