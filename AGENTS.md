@@ -52,6 +52,15 @@ Process files:
 - Stop flag: `news_server.stop`
 - Log: `logs/monitor/log.log` (rotated daily, 7-day retention)
 
+## Tests
+
+```bash
+uv sync --group dev
+uv run --no-sync --group dev pytest
+```
+
+`tests/conftest.py` points the log, both databases and the rate-limit cache file at a scratch folder before anything is imported, so the suite never touches the service's real files. The nightly test gate (`tools/run_tests.sh`, on the analysis host) runs it.
+
 ## Architecture
 
 ### Entry Points
@@ -94,12 +103,8 @@ APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler 
 ## Environment Variables
 
 Loaded from `.env` at startup via `python-dotenv`. API keys for news sources should be set there.
+`NEWS_DB_PATH`, `NEWS_OPTIONS_DB_PATH` and `NEWS_RATE_LIMIT_CACHE_PATH` move the service's database, the read-only options.db and the back-off file; the tests use them to keep to a scratch folder.
 
 ## Git Commit Policy
 
-**Never create a git commit without explicit user confirmation.** Before every commit:
-1. Show the proposed file list and commit message
-2. Ask the user to confirm and provide or approve the message
-3. Only proceed after explicit approval
-
-This applies across all repos in this monorepo.
+Follows the root `../AGENTS.md` *Git Commit Policy*, including its standing authority to commit, push and deploy finished register work.

@@ -7,8 +7,8 @@ USE_TRANSFORMERS=true, otherwise with a keyword heuristic. news_server.py calls 
 per ticker per cycle.
 
 A provider that answers "too many requests" is put on a back-off in the RateLimitCache
-and skipped until it expires. Fetching raises only when every provider failed;
-scoring never raises.
+and skipped until it expires. Fetching raises when no provider could be searched at all,
+so an outage is never mistaken for "no news"; scoring never raises.
 """
 
 from dataclasses import dataclass
@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from html import unescape
 from threading import Lock
 from typing import List, Optional
+
+from dateutil.parser import parse as parse_datetime
 
 import os
 import math
@@ -53,11 +55,24 @@ HTTP_USER_AGENT = os.getenv(
 )
 
 class RateLimitedException(Exception):
-    """Raised when nothing was fetched and at least one provider just answered HTTP 429."""
+    """Raised when no provider could be searched and at least one is rate-limiting us."""
     pass
 
 class AggregatorException(Exception):
-    """Raised when nothing was fetched because every provider raised an error."""
+    """Raised when no provider could be searched: each one errored or has no API key."""
+    pass
+
+
+class ProviderRateLimited(Exception):
+    """A provider refused us: it answered 429 just now (`just_now`), or an earlier back-off is still running."""
+
+    def __init__(self, provider: str, just_now: bool):
+        super().__init__(f"{provider} is rate-limiting us")
+        self.just_now = just_now
+
+
+class ProviderNotConfigured(Exception):
+    """A provider can't be asked because its API key isn't set."""
     pass
 
 # -------------------------------------------------------
@@ -81,8 +96,9 @@ class Headline:
 
 
 # -------------------------------------------------------
-# Provider clients. Each fetch() returns a list of headlines ([] when skipped or on an
-# error), or None when the provider has just rate-limited us.
+# Provider clients. Each fetch() returns the provider's headlines, which may be none at
+# all, and raises when the provider could not be searched: ProviderRateLimited,
+# ProviderNotConfigured, or the request's own error.
 # -------------------------------------------------------
 class NewsClientBase:
     """Common shape of a news provider client."""
@@ -91,7 +107,7 @@ class NewsClientBase:
         self.rate_cache = rate_cache
         self.logger = logger
 
-    def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
+    def fetch(self, ticker: str, ticker_name: str) -> List[Headline]:
         """Headlines about `ticker`, searched by company name when one is known."""
         raise NotImplementedError
 
@@ -103,13 +119,13 @@ class NewsAPIClient(NewsClientBase):
         super().__init__(rate_cache, logger)
         self.api_key = os.getenv("NEWSAPI_KEY")
 
-    def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
+    def fetch(self, ticker: str, ticker_name: str) -> List[Headline]:
         if not self.api_key:
             self.logger.logMessage("[NewsAPI] API key missing; skipping NewsAPI")
-            return []
+            raise ProviderNotConfigured("NEWSAPI_KEY is not set")
 
         if self.rate_cache is not None and self.rate_cache.is_limited("NewsAPI"):
-            return []
+            raise ProviderRateLimited("NewsAPI", just_now=False)
 
         news_sources_str = "bloomberg,reuters,the-wall-street-journal,cnbc,marketwatch,the-new-york-times,financial-times,forbes,business-insider,yahoo-news"
 
@@ -127,35 +143,31 @@ class NewsAPIClient(NewsClientBase):
             "pageSize": 50,
             "apiKey": self.api_key
         }
-        try:
-            resp = _http_session.get(
-                url,
-                params=params,
-                timeout=HTTP_TIMEOUT,
-                headers={"User-Agent": HTTP_USER_AGENT},
-            )
-            # NewsAPI's free tier allows a fixed number of requests per day, so a 429
-            # means "stop for the day": back off for 24 hours.
-            if resp.status_code == 429:
-                self.logger.logMessage("[NewsAPI] Rate limited (429)")
-                if self.rate_cache is not None:
-                    self.rate_cache.add("NewsAPI", 3600 * 24)
-                return None
-            resp.raise_for_status()
-            data = resp.json().get("articles", []) or []
-            out = []
-            for it in data:
-                out.append(Headline(
-                    source="newsapi",
-                    title=it.get("title") or "",
-                    description=it.get("description"),
-                    url=it.get("url"),
-                    published_at=it.get("publishedAt")
-                ))
-            return out
-        except Exception as e:
-            self.logger.logMessage(f"[NewsAPI] fetch error: {e}")
-            return []
+        resp = _http_session.get(
+            url,
+            params=params,
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": HTTP_USER_AGENT},
+        )
+        # NewsAPI's free tier allows a fixed number of requests per day, so a 429
+        # means "stop for the day": back off for 24 hours.
+        if resp.status_code == 429:
+            self.logger.logMessage("[NewsAPI] Rate limited (429)")
+            if self.rate_cache is not None:
+                self.rate_cache.add("NewsAPI", 3600 * 24)
+            raise ProviderRateLimited("NewsAPI", just_now=True)
+        resp.raise_for_status()
+        data = resp.json().get("articles", []) or []
+        out = []
+        for it in data:
+            out.append(Headline(
+                source="newsapi",
+                title=it.get("title") or "",
+                description=it.get("description"),
+                url=it.get("url"),
+                published_at=it.get("publishedAt")
+            ))
+        return out
 
 
 class NewsDataClient(NewsClientBase):
@@ -165,13 +177,13 @@ class NewsDataClient(NewsClientBase):
         super().__init__(rate_cache, logger)
         self.api_key = os.getenv("NEWSDATA_KEY")
 
-    def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
+    def fetch(self, ticker: str, ticker_name: str) -> List[Headline]:
         if not self.api_key:
             self.logger.logMessage("[NewsData] API key missing; skipping NewsData")
-            return []
+            raise ProviderNotConfigured("NEWSDATA_KEY is not set")
 
         if self.rate_cache is not None and self.rate_cache.is_limited("NewsData"):
-            return []
+            raise ProviderRateLimited("NewsData", just_now=False)
 
         categories = [
             "business",
@@ -191,33 +203,29 @@ class NewsDataClient(NewsClientBase):
             "category": categories_str,
 
         }
-        try:
-            resp = _http_session.get(
-                url,
-                params=params,
-                timeout=HTTP_TIMEOUT,
-                headers={"User-Agent": HTTP_USER_AGENT},
-            )
-            if resp.status_code == 429:  # back off for an hour
-                self.logger.logMessage("[NewsData] Rate limited (429)")
-                if self.rate_cache is not None:
-                    self.rate_cache.add("NewsData", 3600)
-                return None
-            resp.raise_for_status()
-            items = resp.json().get("results", []) or []
-            out = []
-            for it in items:
-                out.append(Headline(
-                    source="newsdata",
-                    title=it.get("title") or "",
-                    description=it.get("description"),
-                    url=it.get("link"),
-                    published_at=it.get("pubDate") or it.get("date")
-                ))
-            return out
-        except Exception as e:
-            self.logger.logMessage(f"[NewsData] fetch error: {e}")
-            return []
+        resp = _http_session.get(
+            url,
+            params=params,
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": HTTP_USER_AGENT},
+        )
+        if resp.status_code == 429:  # back off for an hour
+            self.logger.logMessage("[NewsData] Rate limited (429)")
+            if self.rate_cache is not None:
+                self.rate_cache.add("NewsData", 3600)
+            raise ProviderRateLimited("NewsData", just_now=True)
+        resp.raise_for_status()
+        items = resp.json().get("results", []) or []
+        out = []
+        for it in items:
+            out.append(Headline(
+                source="newsdata",
+                title=it.get("title") or "",
+                description=it.get("description"),
+                url=it.get("link"),
+                published_at=it.get("pubDate") or it.get("date")
+            ))
+        return out
 
 
 class GoogleNewsClient(NewsClientBase):
@@ -231,40 +239,36 @@ class GoogleNewsClient(NewsClientBase):
         query = "+OR+".join([k.replace(" ", "+") for k in keywords if k])
         return f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
-    def fetch(self, ticker: str, ticker_name: str) -> Optional[List[Headline]]:
+    def fetch(self, ticker: str, ticker_name: str) -> List[Headline]:
         if self.rate_cache is not None and self.rate_cache.is_limited("GoogleNews"):
-            return []
+            raise ProviderRateLimited("GoogleNews", just_now=False)
 
         query = ticker_name or ticker
         keywords = [query, "stock", "finance"]
         url = self._build_query_url(keywords)
-        try:
-            resp = _http_session.get(
-                url,
-                timeout=HTTP_TIMEOUT,
-                headers={"User-Agent": HTTP_USER_AGENT},
-            )
-            if resp.status_code == 429:  # back off for an hour
-                self.logger.logMessage("[GoogleNews] Rate limited (429)")
-                if self.rate_cache is not None:
-                    self.rate_cache.add("GoogleNews", 3600)
-                return None
-            resp.raise_for_status()
+        resp = _http_session.get(
+            url,
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": HTTP_USER_AGENT},
+        )
+        if resp.status_code == 429:  # back off for an hour
+            self.logger.logMessage("[GoogleNews] Rate limited (429)")
+            if self.rate_cache is not None:
+                self.rate_cache.add("GoogleNews", 3600)
+            raise ProviderRateLimited("GoogleNews", just_now=True)
+        resp.raise_for_status()
 
-            feed = feedparser.parse(resp.content)
-            out = []
-            for entry in feed.entries:
-                out.append(Headline(
-                    source="google",
-                    title=entry.title,
-                    description=clean_description(getattr(entry, "summary", None)),
-                    url=getattr(entry, "link", None),
-                    published_at=getattr(entry, "published", None) or getattr(entry, "updated", None)
-                ))
-            return out
-        except Exception as e:
-            self.logger.logMessage(f"[GoogleNews] fetch error: {e}")
-            return []
+        feed = feedparser.parse(resp.content)
+        out = []
+        for entry in feed.entries:
+            out.append(Headline(
+                source="google",
+                title=entry.title,
+                description=clean_description(getattr(entry, "summary", None)),
+                url=getattr(entry, "link", None),
+                published_at=getattr(entry, "published", None) or getattr(entry, "updated", None)
+            ))
+        return out
 
 
 # -------------------------------------------------------
@@ -275,11 +279,10 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
     Fetch headlines for one ticker from every provider and return them combined.
 
     Providers that fail are logged and skipped, so any headlines at all are a success.
-    With none, raises RateLimitedException if a provider just answered 429, else
-    AggregatorException if any provider raised. The clients catch their own request
-    errors and return [], though, so an outage usually looks like "no headlines": if
-    every provider comes back empty or skipped, this returns [] and the caller stores a
-    neutral 0.0 over the ticker's last real score (NEWSGET-01).
+    An empty list means at least one provider was searched and found nothing, which is
+    a real "no recent news". When no provider could be searched at all, this raises
+    instead (RateLimitedException if any of them is rate-limiting us, else
+    AggregatorException), so the caller never stores an outage as a neutral score.
     """
     clients = [
         ("newsapi", NewsAPIClient(rate_cache, logger)),
@@ -288,25 +291,32 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
     ]
 
     aggregated: List[Headline] = []
+    searched: list[str] = []
     exceptions: list[tuple[str, Exception]] = []
-    rate_limited_sources: list[str] = []
+    rate_limited_sources: list[str] = []   # answered 429 on this call
+    backing_off_sources: list[str] = []    # skipped: an earlier 429's back-off is running
+    not_configured: list[str] = []
 
     # Ask the providers one after another; each failure is recorded, not fatal.
     for name, client in clients:
         try:
             items = client.fetch(ticker, ticker_name)
-            if items is None:
-                # Upstream rate-limited
-                rate_limited_sources.append(name)
-            elif items:
-                aggregated.extend(items)
+        except ProviderRateLimited as e:
+            (rate_limited_sources if e.just_now else backing_off_sources).append(name)
+            continue
+        except ProviderNotConfigured:
+            not_configured.append(name)
+            continue
         except Exception as e:
-            # Log and store the exception for later
             logger.logMessage(f"[Aggregator] {name} client failed for {ticker}: {e}")
             exceptions.append((name, e))
+            continue
+        searched.append(name)
+        aggregated.extend(items)
 
     if aggregated:
-        # Return whatever we managed to collect
+        # Return whatever we managed to collect. A back-off that was already running
+        # isn't news, so only this call's failures are worth a log line.
         if exceptions or rate_limited_sources:
             logger.logMessage(
                 f"[Aggregator] Partial failures for {ticker}: "
@@ -316,19 +326,22 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
             )
         return aggregated
 
-    # If nothing was collected, decide what to raise
-    if rate_limited_sources:
-        raise RateLimitedException(
-            f"All sources failed or rate-limited for {ticker}: {rate_limited_sources}"
-        )
-    elif exceptions:
-        raise AggregatorException(
-            f"All sources failed for {ticker}: "
-            + ", ".join([f"{n}: {type(e).__name__}" for n, e in exceptions])
-        )
-    else:
-        # Every provider was skipped, or answered with no headlines.
+    if searched:
         return []
+
+    # No provider could be searched, so "no headlines" would be a guess: raise instead.
+    if rate_limited_sources or backing_off_sources:
+        raise RateLimitedException(
+            f"No source could be searched for {ticker}; rate-limited: "
+            f"{rate_limited_sources + backing_off_sources}"
+        )
+    raise AggregatorException(
+        f"All sources failed for {ticker}: "
+        + ", ".join(
+            [f"{n}: {type(e).__name__}" for n, e in exceptions]
+            + [f"{n}: no API key" for n in not_configured]
+        )
+    )
 
 
 
@@ -468,8 +481,8 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
                 except Exception as e:
                     logger.logMessage(f"[Sentiment] Transformer scoring failed: {e}")
 
-        # Heuristic path: per headline, (keyword points + polarity points) scaled by
-        # source trust and by recency, then the plain mean over headlines.
+        # Heuristic path: per headline, keyword points + polarity points, then the mean
+        # over headlines weighted by source trust and recency.
         weighted_scores = []
         total_weight = 0.0
         for h in headlines:
@@ -488,16 +501,13 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
             src = (h.source or "").lower()
             sw = SOURCE_WEIGHTS.get(src, SOURCE_WEIGHTS["default"])
 
-            # Recency: a headline's weight halves roughly every two days (e^(-days/3)).
-            # Only ISO dates parse here; other formats keep weight 1.0 (NEWSGET-01).
+            # Recency: a headline's weight halves roughly every two days (e^(-days/3)),
+            # counted in whole days. An unreadable or missing date keeps weight 1.0.
             rec_w = 1.0
-            if h.published_at:
-                try:
-                    pub = datetime.fromisoformat(h.published_at.replace("Z", "+00:00"))
-                    age_days = max(0.0, (datetime.now(timezone.utc) - pub).days)
-                    rec_w = math.exp(-age_days / 3.0)
-                except Exception:
-                    rec_w = 1.0
+            pub = published_datetime(h.published_at)
+            if pub is not None:
+                age_days = max(0.0, (datetime.now(timezone.utc) - pub).days)
+                rec_w = math.exp(-age_days / 3.0)
 
             combined = (kw_score + lex_score) * sw * rec_w
             weighted_scores.append(combined)
@@ -506,7 +516,10 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
         if not weighted_scores or total_weight == 0:
             return 0.0
 
-        avg = sum(weighted_scores) / len(weighted_scores)
+        # Dividing by the summed weights (not the headline count) makes this a true
+        # weighted mean: the weights decide how much each headline counts, without also
+        # shrinking a set of old or low-trust headlines toward zero.
+        avg = sum(weighted_scores) / total_weight
         # Clamp to [-1, 1]; typical scores are far smaller.
         if avg > 1.0: avg = 1.0
         if avg < -1.0: avg = -1.0
@@ -515,6 +528,24 @@ def compute_headlines_sentiment(headlines: List[Headline]) -> float:
     except Exception as e:
         logger.logMessage(f"[Sentiment] compute_headlines_sentiment error: {e}")
         return 0.0
+
+
+def published_datetime(value: Optional[str]) -> Optional[datetime]:
+    """A headline's publish date as a timezone-aware UTC datetime, or None if it can't be read.
+
+    Each provider writes dates its own way: NewsAPI as ISO 8601 ("2026-10-24T13:05:00Z"),
+    NewsData as "2026-10-24 13:05:00" with no zone (it is UTC), and Google News as
+    RFC 822 ("Fri, 24 Oct 2026 13:05:00 GMT").
+    """
+    if not value:
+        return None
+    try:
+        parsed = parse_datetime(value)
+    except (ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def clean_description(html_text: str) -> str:

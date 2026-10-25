@@ -27,6 +27,9 @@ class AppState:
         self.rate_cache = None if is_schema_export() else RateLimitCache()
         # True while a full all-tickers run is in progress; stops two runs overlapping.
         self.is_processing = False
+        # ticker -> (time.monotonic(), exception class, message) of the last fetch where no
+        # provider could be searched. Lets that ticker fail fast for a while.
+        self.failed_fetches: dict[str, tuple[float, type, str]] = {}
 
 
 # ===========================

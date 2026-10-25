@@ -2,19 +2,17 @@
 
 When a provider answers HTTP 429 ("too many requests"), the fetch code records a back-off
 here, and every later fetch checks it first so we stop calling that provider until the
-back-off expires. `CacheManager` is a small generic key/value store with expiry and a JSON
-file; `RateLimitCache` is the one cache this service uses.
+back-off expires. `CacheManager` is a small generic key/value store with expiry, kept in
+a JSON file; `RateLimitCache` is the one cache this service uses.
 
-Caution: the JSON file is loaded at startup but only written by a shutdown callback, and
-news-getter never fires shutdown callbacks, so in practice back-offs are lost on restart
-(NEWSGET-01).
+Every new entry is written to the file straight away, so a back-off survives a restart:
+NewsAPI's is 24 hours, and forgetting it would spend the next day's quota on refusals.
 """
 import json
 import os
 import tempfile
 from datetime import datetime, timedelta
 from threading import RLock
-from shared_options.services.shutdown_handler import ShutdownManager
 from shared_options.log.logger_singleton import getLogger
 
 
@@ -24,7 +22,7 @@ class CacheManager:
     Thread-safe key/value cache whose entries expire after a time-to-live (TTL).
 
     Each entry is stored as {"Value": ..., "Timestamp": <when it was added>}. The cache
-    is loaded from `filepath` on creation and saved back to it on shutdown.
+    is loaded from `filepath` on creation and saved back to it on every `add()`.
     """
 
     def __init__(self,
@@ -33,7 +31,7 @@ class CacheManager:
                  ttl_days: float = None,
                  ttl_hours: float = None,
                  ttl_minutes: float = None):
-        """Create the cache, register its save-on-shutdown hook, and load the file."""
+        """Create the cache and load whatever its file holds."""
         self._cache = {}
         self._lock = RLock()
 
@@ -44,12 +42,6 @@ class CacheManager:
         self.ttl_minutes = ttl_minutes
         self.logger = getLogger()
 
-        # Defensive retry: initialise the shutdown manager if registering fails.
-        try:
-            ShutdownManager.register(self.name, lambda reason=None: self._save_cache())
-        except TypeError:
-            ShutdownManager.init(error_logger=self.logger.logMessage)
-            ShutdownManager.register(self.name, lambda reason=None: self._save_cache())
         self.logger.logMessage(f"Loading {self.name}...")
         self._load_cache()
         self.logger.logMessage(f"Successfully loaded {self.name}.")
@@ -85,24 +77,23 @@ class CacheManager:
     def _save_cache(self):
         """Write all entries to the JSON file. Logs and continues on failure."""
         try:
-            # Copy under lock
+            # Snapshot and write under one lock: two threads saving at once could
+            # otherwise finish out of order, and the older snapshot would win on disk.
             with self._lock:
-                cache_copy = dict(self._cache)
+                serializable = {
+                    k: {"Value": v["Value"], "Timestamp": v["Timestamp"].isoformat()}
+                    for k, v in self._cache.items()
+                }
 
-            serializable = {
-                k: {"Value": v["Value"], "Timestamp": v["Timestamp"].isoformat()}
-                for k, v in cache_copy.items()
-            }
+                # Write to a temporary file and rename it over the real one, so a crash
+                # mid-write can never leave a half-written cache file behind.
+                dir_name = os.path.dirname(self.filepath)
+                with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tmp:
+                    json.dump(serializable, tmp, indent=2, default=str)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
 
-            # Write to a temporary file and rename it over the real one, so a crash
-            # mid-write can never leave a half-written cache file behind.
-            dir_name = os.path.dirname(self.filepath)
-            with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tmp:
-                json.dump(serializable, tmp, indent=2, default=str)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-
-            os.replace(tmp.name, self.filepath)
+                os.replace(tmp.name, self.filepath)
         except Exception as e:
             self.logger.logMessage(f"[{self.name}] Failed to save cache: {e}")
 
@@ -125,12 +116,13 @@ class CacheManager:
     # Public Cache Methods
     # ----------------------------
     def add(self, key, value):
-        """Store `value` under `key`, stamped with the current time."""
+        """Store `value` under `key`, stamped with the current time, and save the file."""
         with self._lock:
             self._cache[key] = {
                 "Value": value,
                 "Timestamp": datetime.now().astimezone()
             }
+        self._save_cache()
 
     def evict_expired(self) -> int:
         """Drop every expired entry from memory and return how many were dropped."""
@@ -142,10 +134,15 @@ class CacheManager:
 
 
 class RateLimitCache(CacheManager):
-    """Per-provider back-offs. Key = provider name, value = back-off length in seconds."""
+    """Per-provider back-offs. Key = provider name, value = back-off length in seconds.
 
-    def __init__(self):
-        super().__init__("RateLimit Cache", "cache/ratelimit_sentiment.json", ttl_days=1)
+    The file is `cache/ratelimit_sentiment.json` under the working directory, unless
+    NEWS_RATE_LIMIT_CACHE_PATH names another (the tests point it at a scratch folder).
+    """
+
+    def __init__(self, filepath: str | None = None):
+        path = filepath or os.getenv("NEWS_RATE_LIMIT_CACHE_PATH", "cache/ratelimit_sentiment.json")
+        super().__init__("RateLimit Cache", path, ttl_days=1)
 
     def is_limited(self, key: str) -> bool:
         """

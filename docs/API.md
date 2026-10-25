@@ -11,7 +11,7 @@ Implementation source of truth: `news_server.py` (`news_server:app`). FastAPI al
 | Method and path | Inputs | Response / behavior |
 |---|---|---|
 | `GET /` | None | Health summary: `status`, `service`, `scheduler_running`, `is_processing`. |
-| `POST /sentiment/{symbol}/score` | Path `symbol`; query `include_articles=false`, `force_refresh=false` | Returns `SentimentResponse`. Uses a DB record less than one hour old unless refresh is forced; otherwise fetches news, stores articles, computes sentiment, and upserts the symbol aggregate. Upstream rate limiting maps to 429; aggregation failures map to 502. |
+| `POST /sentiment/{symbol}/score` | Path `symbol`; query `include_articles=false`, `force_refresh=false` | Returns `SentimentResponse`. Uses a DB record less than one hour old unless refresh is forced (`from_cache: true`); otherwise fetches news, stores articles, computes sentiment, and upserts the symbol aggregate (`from_cache: false`). A provider that was searched and found nothing yields a stored 0.0 with `article_count: 0`. When no provider could be searched, answers 429 if any is rate-limiting us and 502 otherwise, leaves the stored score unchanged, and answers that same error for the ticker for 30 minutes unless `force_refresh=true`. |
 | `GET /sentiment/aggregate` | Optional comma-separated query `tickers` | Average of available `symbol_sentiment.sentiment_score` records. Returns `scope`, `sentiment_score`, `ticker_count`, `computed_at`; performs no write. |
 | `GET /stats` | None | Counts, average sentiment, and ten most recently updated symbols. |
 | `GET /symbols` | Query `skip=0`, `limit=100` | Page of distinct symbols read from the upstream `option_lifetimes` table via read-only SQLite. |

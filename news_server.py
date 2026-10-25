@@ -18,6 +18,7 @@ ensure_shared_options_path()
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
@@ -69,6 +70,13 @@ app_state = AppState()
 BATCH_SIZE = 20
 DB_CONCURRENCY_LIMIT = 4
 db_semaphore = asyncio.Semaphore(DB_CONCURRENCY_LIMIT)
+
+# A stored score younger than this is served without asking the providers again.
+FRESH_SCORE_SECONDS = 3600
+# After a fetch where no provider could be searched, the same ticker fails fast for this
+# long instead of retrying. During an outage each attempt can wait out every provider's
+# timeout, and the scanner asks for each ticker on every scan cycle.
+FAILED_FETCH_RETRY_SECONDS = 30 * 60
 
 
 def _is_production() -> bool:
@@ -164,7 +172,9 @@ async def aggregate_and_store_ticker(
     A score less than an hour old is returned as is, unless `force_refresh`. Otherwise:
     fetch headlines, store the new ones, score them, and save the score. Returns a dict
     shaped like SentimentResponse. Raises RateLimitedException or AggregatorException
-    when no headlines could be fetched at all.
+    when no provider could be searched; the ticker's last real score is then left as it
+    was, and the same ticker fails fast for FAILED_FETCH_RETRY_SECONDS unless
+    `force_refresh`.
 
     Providers are searched by `ticker_name` (the company name) when one is known; a bare
     ticker such as "ON" or "ALL" would also match ordinary words.
@@ -191,7 +201,7 @@ async def aggregate_and_store_ticker(
                     )
 
                     age = datetime.now(timezone.utc) - last_updated
-                    if age.total_seconds() < 3600:
+                    if age.total_seconds() < FRESH_SCORE_SECONDS:
                         logger.logMessage(
                             f"[API] Cache hit for {ticker} (age={age.total_seconds():.0f}s)",
                             log_type=LogType.Server,
@@ -210,17 +220,31 @@ async def aggregate_and_store_ticker(
 
                         return sentiment_to_dict(existing, articles=articles, from_cache=True)
 
+            # A recent fetch where no provider could be searched: fail fast with its error.
+            failure = app_state.failed_fetches.get(ticker)
+            if failure and time.monotonic() - failure[0] < FAILED_FETCH_RETRY_SECONDS:
+                _, error_type, message = failure
+                raise error_type(
+                    f"{message} (not retried for {FAILED_FETCH_RETRY_SECONDS // 60} min; "
+                    "force_refresh=true retries now)"
+                )
+
         logger.logMessage(f"[API] Aggregating news for {ticker}", log_type=LogType.Server)
 
         # ============================
         # 2. Fetch headlines (NON-DB)
         # ============================
-        headlines: list[Headline] = await asyncio.to_thread(
-            aggregate_headlines_smart,
-            ticker,
-            ticker_name or "",
-            app_state.rate_cache,
-        )
+        try:
+            headlines: list[Headline] = await asyncio.to_thread(
+                aggregate_headlines_smart,
+                ticker,
+                ticker_name or "",
+                app_state.rate_cache,
+            )
+        except (RateLimitedException, AggregatorException) as e:
+            app_state.failed_fetches[ticker] = (time.monotonic(), type(e), str(e))
+            raise
+        app_state.failed_fetches.pop(ticker, None)
 
         if headlines is None:
             raise AggregatorException(f"Aggregator returned None for {ticker}")
@@ -244,29 +268,36 @@ async def aggregate_and_store_ticker(
             if deleted:
                 logger.logMessage(f"[DB] Removed {deleted} stale articles for {ticker}")
 
-            # Find which incoming URLs are already stored, in one query instead of one per
-        # headline. (Matches across all tickers, not just this one: NEWSGET-01.)
+            # Find which incoming URLs this ticker already has, in one query instead of
+            # one per headline. Articles are stored per ticker (one story about two
+            # companies is a row for each), so the match must not look across tickers.
             incoming_urls = {h.url for h in headlines if h.url}
             existing_urls: set[str] = set()
             if incoming_urls:
                 existing_urls = {
                     row.url
                     for row in db.query(NewsArticle.url)
-                    .filter(NewsArticle.url.in_(incoming_urls))
+                    .filter(NewsArticle.symbol == ticker, NewsArticle.url.in_(incoming_urls))
                     .all()
                 }
                 # Seen again today: refresh fetched_at so the 1-day purge above keeps them.
                 stale_urls = incoming_urls & existing_urls
                 if stale_urls:
                     db.query(NewsArticle).filter(
-                        NewsArticle.url.in_(stale_urls)
+                        NewsArticle.symbol == ticker,
+                        NewsArticle.url.in_(stale_urls),
                     ).update({"fetched_at": now}, synchronize_session=False)
 
             # Insert only articles we haven't stored, and collect the same rows for the response.
+            # `existing_urls` grows as we go: two providers can return the same story,
+            # and a second insert of one (ticker, url) would break the unique index and
+            # fail the whole commit.
             articles_data = []
             for h in headlines:
                 if h.url and h.url in existing_urls:
                     continue
+                if h.url:
+                    existing_urls.add(h.url)
 
                 db.add(NewsArticle(
                     symbol=ticker,
@@ -488,6 +519,18 @@ async def save_tickers_to_db(db: Session = None):
         db.close()
 
 
+def _schedule_aggregation(interval_minutes: int) -> None:
+    """Add (or replace) the repeating all-tickers refresh, wrapped so its errors are logged."""
+    app_state.scheduler.add_job(
+        job_wrapper,
+        trigger=IntervalTrigger(minutes=interval_minutes),
+        id="news_aggregation",
+        name="Aggregate news for all tickers",
+        replace_existing=True,
+        kwargs={"job_func": process_all_tickers}
+    )
+
+
 async def start_scheduler():
     """Load ticker names once, then start the three repeating jobs: sentiment, ticker names, cache eviction."""
     app_state.scheduler = AsyncIOScheduler()
@@ -499,14 +542,7 @@ async def start_scheduler():
     logger.logMessage("[Scheduler] Running initial ticker save at startup...")
     await save_tickers_to_db(db=SessionLocal())
     logger.logMessage("[Scheduler] Initial ticker save complete.")
-    app_state.scheduler.add_job(
-        job_wrapper,
-        trigger=IntervalTrigger(minutes=interval_minutes),
-        id="news_aggregation",
-        name="Aggregate news for all tickers",
-        replace_existing=True,
-        kwargs={"job_func": process_all_tickers}
-    )
+    _schedule_aggregation(interval_minutes)
 
     app_state.scheduler.add_job(
         job_wrapper,
@@ -612,8 +648,10 @@ async def get_sentiment_score(
     """
     Sentiment for one ticker, refreshed from the news if the stored score is over an hour old.
 
-    Articles are included only when `include_articles=true` (up to 50). Upstream rate
-    limiting answers 429, and every provider failing answers 502.
+    Articles are included only when `include_articles=true` (up to 50). When no news
+    provider could be searched, answers 429 if any of them is rate-limiting us and 502
+    otherwise, and the ticker's stored score is left unchanged. After such a failure the
+    same ticker answers the same error for 30 minutes, unless `force_refresh=true`.
     """
     symbol = symbol.upper()
 
@@ -634,9 +672,6 @@ async def get_sentiment_score(
     # Ensure the articles key exists
     if "articles" not in sentiment_data:
         sentiment_data["articles"] = []
-
-    # Overwrites the accurate value set above, so a cache miss reports true (NEWSGET-01).
-    sentiment_data["from_cache"] = not force_refresh
 
     if not include_articles:
         sentiment_data["articles"] = []
@@ -701,14 +736,7 @@ async def configure_scheduler(
                 trigger=IntervalTrigger(minutes=config.interval_minutes)
             )
         else:
-            # Add new job
-            app_state.scheduler.add_job(
-                process_all_tickers,
-                trigger=IntervalTrigger(minutes=config.interval_minutes),
-                id="news_aggregation",
-                name="Aggregate news for all tickers",
-                replace_existing=True,
-            )
+            _schedule_aggregation(config.interval_minutes)
         message = f"Scheduler configured: {config.interval_minutes}min interval"
     else:
         if job:

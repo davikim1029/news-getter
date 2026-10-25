@@ -116,6 +116,19 @@ def is_server_running():
     )
 
 
+def _running_pid() -> int | None:
+    """The running server's PID: from the PID file, else from whatever listens on the port.
+
+    `is_server_running()` can say yes from the port alone, after the PID file was
+    deleted or found stale, so callers must not assume the file is there.
+    """
+    try:
+        return int(PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        proc = get_process_using_port(PORT)
+        return proc.pid if proc else None
+
+
 def get_process_using_port(port: int):
     """The process listening on `port`, or None if there is none or we may not inspect it."""
     try:
@@ -206,8 +219,8 @@ def start_server():
     global server_start_time
 
     if is_server_running():
-        pid = int(PID_FILE.read_text())
-        print(f"Server is already running with PID {pid}")
+        pid = _running_pid()
+        print(f"Server is already running with PID {pid if pid else 'unknown'} (port {PORT})")
         if server_start_time:
             print(f"Started at: {server_start_time}")
         return
@@ -290,14 +303,19 @@ def stop_server():
 def check_server():
     """Print whether the server is running, with its PID, CPU and memory use."""
     if is_server_running():
-        pid = int(PID_FILE.read_text())
-        proc = psutil.Process(pid)
-        
+        pid = _running_pid()
         print("✓ Server is running")
-        print(f"  PID: {pid}")
-        print(f"  CPU: {proc.cpu_percent()}%")
-        print(f"  Memory: {proc.memory_info().rss / 1024 / 1024:.1f} MB")
-        print(f"  Started: {datetime.fromtimestamp(proc.create_time()).strftime('%Y-%m-%d %H:%M:%S')}")
+        try:
+            proc = psutil.Process(pid) if pid else None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            proc = None
+        if proc is None:
+            print(f"  PID: unknown (port {PORT} is in use, but its process can't be inspected)")
+        else:
+            print(f"  PID: {pid}")
+            print(f"  CPU: {proc.cpu_percent()}%")
+            print(f"  Memory: {proc.memory_info().rss / 1024 / 1024:.1f} MB")
+            print(f"  Started: {datetime.fromtimestamp(proc.create_time()).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"  API: http://localhost:{PORT}")
         print(f"  Docs: http://localhost:{PORT}/docs")
     else:
