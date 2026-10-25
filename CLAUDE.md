@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Session Startup
 
-At the start of every Claude Code session, immediately run `/load-docs news-getter` as the first action before responding to any request.
+At the start of every session, before responding to any request, load this service's docs: in Claude Code, run `/load-docs news-getter`; any other agent reads `../docs/PROJECT_STRUCTURE.md`, `docs/architecture.md` and `docs/API.md` itself.
 
 ## Cross-Service API Reference
 
@@ -26,6 +26,8 @@ Before writing any code that calls another service, **read that service's `docs/
 `news-getter` is a FastAPI news aggregator service (port 9000) that fetches and scores news sentiment per ticker using NLP models. It uses APScheduler to run background aggregation tasks and exposes a REST API for on-demand sentiment retrieval.
 
 This service is part of a larger monorepo — see the parent `CLAUDE.md` at `../CLAUDE.md` for full architecture context.
+
+`AGENTS.md` beside this file is the same guide for Codex: edit this file, then run `python3 ../tools/validate_agent_policy.py --sync` from here, which copies it there.
 
 **What is currently being *worked on* lives in `../.plans/WORKPLAN.md` (untracked, so it is absent from a fresh clone), not here** — read its *RESUME HERE* section before planning anything. This file describes how the service is built; the register says what is being done to it, what is scheduled, and what has been verified on the box. Re-measure before acting on any dated claim in either.
 
