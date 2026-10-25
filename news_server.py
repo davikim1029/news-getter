@@ -41,6 +41,7 @@ from models.models import (
     AppState,
     NewsArticle,
     SchedulerConfig,
+    SentimentRequest,
     SentimentResponse,
     SymbolSentiment,
     sentiment_to_dict,
@@ -71,8 +72,17 @@ BATCH_SIZE = 20
 DB_CONCURRENCY_LIMIT = 4
 db_semaphore = asyncio.Semaphore(DB_CONCURRENCY_LIMIT)
 
-# A stored score younger than this is served without asking the providers again.
-FRESH_SCORE_SECONDS = 3600
+# A stored score younger than this is served without asking the providers again. Three
+# hours, not one: most tickers' news barely changes in an hour, and every refresh is a
+# search the providers may refuse (Google refused most days in October at ~33,600 a day).
+FRESH_SCORE_SECONDS = 3 * 3600
+# The scheduled refresh covers tickers a caller asked for within this many days.
+REQUESTED_WITHIN_DAYS = 7
+# A ticker's request time is rewritten at most this often.
+REQUEST_STAMP_INTERVAL_SECONDS = 10 * 60
+# /sentiment/aggregate averages only scores refreshed within this many hours, so tickers
+# nobody refreshes any more (some untouched since January) stop counting.
+AGGREGATE_MAX_AGE_HOURS = 24
 # After a fetch where no provider could be searched, the same ticker fails fast for this
 # long instead of retrying. During an outage each attempt can wait out every provider's
 # timeout, and the scanner asks for each ticker on every scan cycle.
@@ -169,12 +179,13 @@ async def aggregate_and_store_ticker(
     """
     Return a ticker's sentiment, recomputing it from fresh headlines when needed.
 
-    A score less than an hour old is returned as is, unless `force_refresh`. Otherwise:
-    fetch headlines, store the new ones, score them, and save the score. Returns a dict
-    shaped like SentimentResponse. Raises RateLimitedException or AggregatorException
-    when no provider could be searched; the ticker's last real score is then left as it
-    was, and the same ticker fails fast for FAILED_FETCH_RETRY_SECONDS unless
-    `force_refresh`.
+    A score younger than FRESH_SCORE_SECONDS is returned as is, unless `force_refresh`.
+    Otherwise: fetch headlines, store the new ones, score them, and save the score.
+    Returns a dict shaped like SentimentResponse; its score is None when every provider
+    searched and found no headlines. Raises RateLimitedException or AggregatorException
+    when there are no headlines and some provider could not be searched; the ticker's
+    last real score is then left as it was, and the same ticker fails fast for
+    FAILED_FETCH_RETRY_SECONDS unless `force_refresh`.
 
     Providers are searched by `ticker_name` (the company name) when one is known; a bare
     ticker such as "ON" or "ALL" would also match ordinary words.
@@ -325,8 +336,10 @@ async def aggregate_and_store_ticker(
         # ============================
         # 4. Compute sentiment (NON-DB)
         # ============================
-        sentiment_score = await asyncio.to_thread(
-            compute_headlines_sentiment, headlines
+        # No headlines means nothing to score. Storing None, not the scorer's 0.0, keeps
+        # "no news" from reading as neutral news.
+        sentiment_score = (
+            await asyncio.to_thread(compute_headlines_sentiment, headlines) if headlines else None
         )
 
         # ============================
@@ -367,9 +380,9 @@ async def aggregate_and_store_ticker(
             db.commit()
             db.refresh(record)
 
+        shown = "none" if sentiment_score is None else f"{sentiment_score:.3f}"
         logger.logMessage(
-            f"[API] {ticker}: sentiment={sentiment_score:.3f}, "
-            f"articles={len(headlines)}",
+            f"[API] {ticker}: sentiment={shown}, articles={len(headlines)}",
             log_type=LogType.Server,
         )
 
@@ -384,6 +397,43 @@ async def aggregate_and_store_ticker(
     except Exception as e:
         logger.logMessage(f"[API] Fatal error for {ticker}: {e}", log_type=LogType.Server)
         raise
+
+
+def _stamp_request(db: Session, symbol: str) -> None:
+    """Record that a caller asked for `symbol`, at most once per REQUEST_STAMP_INTERVAL_SECONDS.
+
+    The scheduled refresh reads these to cover only tickers that are actually used. A
+    failure here is logged and ignored: it must never cost the caller its score.
+    """
+    now_mono = time.monotonic()
+    if now_mono - app_state.request_stamped.get(symbol, -1e18) < REQUEST_STAMP_INTERVAL_SECONDS:
+        return
+    try:
+        db.merge(SentimentRequest(symbol=symbol, last_requested_at=datetime.now(timezone.utc)))
+        db.commit()
+        app_state.request_stamped[symbol] = now_mono
+    except Exception as e:
+        db.rollback()
+        logger.logMessage(f"[API] Could not record the request for {symbol}: {e}")
+
+
+def _scheduled_symbols() -> list[str]:
+    """The tickers the scheduled refresh covers: those asked for in the last REQUESTED_WITHIN_DAYS.
+
+    Until request history spans that many days (the first week after this was deployed),
+    every ticker with options history is added too, so no ticker the scanner uses goes
+    stale while the history fills in.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=REQUESTED_WITHIN_DAYS)
+    with db_session() as db:
+        requested = [
+            row.symbol for row in
+            db.query(SentimentRequest.symbol).filter(SentimentRequest.last_requested_at >= cutoff)
+        ]
+        first = db.query(func.min(SentimentRequest.last_requested_at)).scalar()
+    if first is not None and first.replace(tzinfo=first.tzinfo or timezone.utc) <= cutoff:
+        return sorted(requested)
+    return sorted(set(requested) | set(list_option_symbols()))
 
 
 async def process_all_tickers():
@@ -401,7 +451,7 @@ async def process_all_tickers():
     with db_session() as db:
         symbol_map = load_symbol_map(db)
 
-    unique_symbols = list_option_symbols()
+    unique_symbols = _scheduled_symbols()
 
     if not unique_symbols:
         logger.logMessage("[Scheduler] No symbols to process")
@@ -646,14 +696,17 @@ async def get_sentiment_score(
     db: Session = Depends(get_db)
 ):
     """
-    Sentiment for one ticker, refreshed from the news if the stored score is over an hour old.
+    Sentiment for one ticker, refreshed from the news if the stored score is over three hours old.
 
-    Articles are included only when `include_articles=true` (up to 50). When no news
-    provider could be searched, answers 429 if any of them is rate-limiting us and 502
-    otherwise, and the ticker's stored score is left unchanged. After such a failure the
-    same ticker answers the same error for 30 minutes, unless `force_refresh=true`.
+    `sentiment_score` is null when every provider searched and found no headlines.
+    Articles are included only when `include_articles=true` (up to 50). When there are no
+    headlines and some provider was refused, failed or is backing off, answers 429 if any
+    of them is rate-limiting us and 502 otherwise, and the ticker's stored score is left
+    unchanged. After such a failure the same ticker answers the same error for 30 minutes,
+    unless `force_refresh=true`.
     """
     symbol = symbol.upper()
+    _stamp_request(db, symbol)
 
     try:
         sentiment_data = await aggregate_and_store_ticker(
@@ -833,12 +886,17 @@ async def get_aggregate_sentiment(
     - No `tickers` param → market-wide average of all tracked symbols.
     - `tickers=AAPL,MSFT,...` → average only for those symbols.
 
-    Only includes symbols that have a recorded sentiment score.
-    Returns 0.0 with ticker_count=0 when no data is available.
+    Only scores refreshed in the last 24 hours count, and a ticker whose providers found no
+    headlines has no score to count. `sentiment_score` is null, with `ticker_count` 0, when
+    no ticker qualifies.
     """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=AGGREGATE_MAX_AGE_HOURS)
     query = db.query(
         func.avg(SymbolSentiment.sentiment_score).label("avg_score"),
         func.count(SymbolSentiment.id).label("cnt"),
+    ).filter(
+        SymbolSentiment.sentiment_score.isnot(None),
+        SymbolSentiment.last_updated >= cutoff,
     )
 
     if tickers:
@@ -847,7 +905,7 @@ async def get_aggregate_sentiment(
             query = query.filter(SymbolSentiment.symbol.in_(ticker_list))
 
     row = query.one()
-    avg_score = float(row.avg_score) if row.avg_score is not None else 0.0
+    avg_score = float(row.avg_score) if row.avg_score is not None else None
     ticker_count = int(row.cnt) if row.cnt else 0
 
     scope = "market" if not tickers else f"custom({ticker_count} symbols)"

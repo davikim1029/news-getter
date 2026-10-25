@@ -65,9 +65,23 @@ def _migration_v1_base_schema(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sentiment_updated ON symbol_sentiment(last_updated DESC)")
 
 
+def _migration_v2_sentiment_requests(conn):
+    """
+    v2: sentiment_requests, when the scanner last asked for each ticker's score. The
+    scheduled refresh reads it to cover only the tickers that are actually used.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sentiment_requests (
+            symbol VARCHAR(10) PRIMARY KEY,
+            last_requested_at DATETIME NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_sentiment_requests_last ON sentiment_requests(last_requested_at)")
+
+
 _MIGRATIONS = [
     (1, _migration_v1_base_schema),
-    # (2, _migration_v2_...),  # add future migrations here
+    (2, _migration_v2_sentiment_requests),
 ]
 
 

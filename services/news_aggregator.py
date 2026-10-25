@@ -251,8 +251,11 @@ class GoogleNewsClient(NewsClientBase):
             timeout=HTTP_TIMEOUT,
             headers={"User-Agent": HTTP_USER_AGENT},
         )
-        if resp.status_code == 429:  # back off for an hour
-            self.logger.logMessage("[GoogleNews] Rate limited (429)")
+        # Google refuses with 503 rather than 429 when it decides the traffic is automated,
+        # and it did so on 12 of 14 trading days measured in October. Retrying at once only
+        # adds to the traffic it is refusing, so both statuses back off for an hour.
+        if resp.status_code in (429, 503):
+            self.logger.logMessage(f"[GoogleNews] Refused ({resp.status_code}); backing off for 1 h")
             if self.rate_cache is not None:
                 self.rate_cache.add("GoogleNews", 3600)
             raise ProviderRateLimited("GoogleNews", just_now=True)
@@ -279,10 +282,11 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
     Fetch headlines for one ticker from every provider and return them combined.
 
     Providers that fail are logged and skipped, so any headlines at all are a success.
-    An empty list means at least one provider was searched and found nothing, which is
-    a real "no recent news". When no provider could be searched at all, this raises
-    instead (RateLimitedException if any of them is rate-limiting us, else
-    AggregatorException), so the caller never stores an outage as a neutral score.
+    An empty list means every configured provider searched and found nothing, which is a
+    real "no recent news". If any of them was refused, failed or is backing off, an empty
+    result proves nothing (NewsAPI alone searches only ten publishers), so this raises
+    instead: RateLimitedException if any provider is rate-limiting us, else
+    AggregatorException. The caller then keeps the last real score.
     """
     clients = [
         ("newsapi", NewsAPIClient(rate_cache, logger)),
@@ -326,17 +330,18 @@ def aggregate_headlines_smart(ticker: str, ticker_name: str, rate_cache: RateLim
             )
         return aggregated
 
-    if searched:
+    unanswered = exceptions or rate_limited_sources or backing_off_sources
+    if searched and not unanswered:
         return []
 
-    # No provider could be searched, so "no headlines" would be a guess: raise instead.
+    # Some provider never answered, so "no headlines" would be a guess: raise instead.
     if rate_limited_sources or backing_off_sources:
         raise RateLimitedException(
-            f"No source could be searched for {ticker}; rate-limited: "
-            f"{rate_limited_sources + backing_off_sources}"
+            f"No headlines for {ticker} and not every source could be searched; "
+            f"rate-limited: {rate_limited_sources + backing_off_sources}"
         )
     raise AggregatorException(
-        f"All sources failed for {ticker}: "
+        f"No headlines for {ticker} and not every source could be searched: "
         + ", ".join(
             [f"{n}: {type(e).__name__}" for n, e in exceptions]
             + [f"{n}: no API key" for n in not_configured]

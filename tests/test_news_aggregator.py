@@ -53,10 +53,27 @@ def test_no_api_keys_and_a_failing_google_is_an_error_not_no_news(monkeypatch):
         na.aggregate_headlines_smart("AAPL", "Apple")
 
 
-def test_a_provider_that_searched_and_found_nothing_means_no_news(monkeypatch):
-    _providers(monkeypatch, na.ProviderNotConfigured("no key"), ConnectionError("down"), [])
+def test_every_configured_provider_finding_nothing_means_no_news(monkeypatch):
+    _providers(monkeypatch, na.ProviderNotConfigured("no key"), [], [])
 
     assert na.aggregate_headlines_smart("AAPL", "Apple") == []
+
+
+def test_no_headlines_while_a_provider_failed_is_an_error_not_no_news(monkeypatch):
+    _providers(monkeypatch, na.ProviderNotConfigured("no key"), ConnectionError("down"), [])
+
+    with pytest.raises(na.AggregatorException):
+        na.aggregate_headlines_smart("AAPL", "Apple")
+
+
+def test_no_headlines_while_google_is_refusing_is_rate_limited_not_no_news(monkeypatch):
+    # NewsAPI searches only ten publishers, so its empty answer for a small company says
+    # nothing; with Google refusing, the honest answer is "could not tell".
+    _providers(monkeypatch, [], na.ProviderRateLimited("NewsData", just_now=False),
+               na.ProviderRateLimited("GoogleNews", just_now=True))
+
+    with pytest.raises(na.RateLimitedException):
+        na.aggregate_headlines_smart("ACME", "Acme Corp")
 
 
 def test_any_headlines_are_returned_even_when_other_providers_fail(monkeypatch):
@@ -92,6 +109,23 @@ def test_a_429_records_a_backoff_and_raises(monkeypatch, tmp_path):
     with pytest.raises(na.ProviderRateLimited) as raised:
         na.NewsDataClient(cache, na.logger).fetch("AAPL", "Apple")
     assert not raised.value.just_now
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_google_refusal_backs_off_for_an_hour(monkeypatch, tmp_path, status):
+    from services.core.cache_manager import RateLimitCache
+
+    cache = RateLimitCache(filepath=str(tmp_path / "ratelimit.json"))
+    monkeypatch.setattr(na._http_session, "get", lambda *a, **k: _Response(status))
+
+    with pytest.raises(na.ProviderRateLimited) as raised:
+        na.GoogleNewsClient(cache, na.logger).fetch("AAPL", "Apple")
+    assert raised.value.just_now
+    assert cache.is_limited("GoogleNews")
+
+    monkeypatch.setattr(na._http_session, "get", lambda *a, **k: pytest.fail("called a backing-off provider"))
+    with pytest.raises(na.ProviderRateLimited):
+        na.GoogleNewsClient(cache, na.logger).fetch("AAPL", "Apple")
 
 
 @pytest.mark.parametrize("value", [

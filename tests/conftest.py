@@ -42,10 +42,11 @@ def news_db():
 
     init_database()
     with SessionLocal() as db:
-        for table in ("news_articles", "symbol_sentiment", "tickers"):
+        for table in ("news_articles", "symbol_sentiment", "tickers", "sentiment_requests"):
             db.execute(news_server.text(f"DELETE FROM {table}"))
         db.commit()
     news_server.app_state.failed_fetches.clear()
+    news_server.app_state.request_stamped.clear()
     return news_server
 
 

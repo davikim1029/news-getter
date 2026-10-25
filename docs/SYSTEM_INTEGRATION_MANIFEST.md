@@ -31,9 +31,9 @@ Python-level interfaces intentionally consumed inside the service include `aggre
 
 ## State management and data storage assumptions
 
-The canonical news store is now `news-getter/database/news.db` (or `NEWS_DB_PATH`). `news-getter` owns migrations for `news_articles`, `symbol_sentiment`, `tickers`, and `news_migrations`; it assumes `option_lifetimes` exists in the upstream options DB and remains readable. On first startup after cutover, legacy news rows are copied from `options.db` only if the new news tables are empty.
+The canonical news store is now `news-getter/database/news.db` (or `NEWS_DB_PATH`). `news-getter` owns migrations for `news_articles`, `symbol_sentiment`, `tickers`, `sentiment_requests` (v2), and `news_migrations`; it assumes `option_lifetimes` exists in the upstream options DB and remains readable. On first startup after cutover, legacy news rows are copied from `options.db` only if the new news tables are empty.
 
-Ticker sentiment is considered fresh for one hour. Per-symbol articles older than one day are deleted during refresh; the cleanup endpoint can apply another caller-selected retention. The ticker-name table refreshes at startup and every two weeks. Aggregation defaults to every 60 minutes via `AGGREGATION_INTERVAL_MINUTES`.
+Ticker sentiment is considered fresh for three hours, and `/sentiment/aggregate` counts only scores refreshed in the last 24 hours. Per-symbol articles older than one day are deleted during refresh; the cleanup endpoint can apply another caller-selected retention. The ticker-name table refreshes at startup and every two weeks. Aggregation defaults to every 60 minutes via `AGGREGATION_INTERVAL_MINUTES`.
 
 The rate-limit cache lives in memory and in `cache/ratelimit_sentiment.json`, which is loaded at startup and rewritten on every new back-off, so back-offs survive a restart. The failed-fetch memory (30-minute fail-fast per ticker), scheduler jobs, `is_processing`, the DB semaphore, HTTP session, and optional model pipeline are process-local. The design assumes one service instance, a stable repository-relative directory layout, writable local disk, and trusted network access.
 

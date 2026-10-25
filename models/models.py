@@ -30,6 +30,9 @@ class AppState:
         # ticker -> (time.monotonic(), exception class, message) of the last fetch where no
         # provider could be searched. Lets that ticker fail fast for a while.
         self.failed_fetches: dict[str, tuple[float, type, str]] = {}
+        # ticker -> time.monotonic() of the last request we wrote to sentiment_requests, so
+        # a scanner asking for the same ticker every cycle costs one write per interval.
+        self.request_stamped: dict[str, float] = {}
 
 
 # ===========================
@@ -40,7 +43,9 @@ class SentimentResponse(BaseModel):
 
     symbol: str
     symbol_name: Optional[str]
-    sentiment_score: float
+    # None when the providers found no headlines: there is nothing to score, and 0.0 would
+    # read as neutral news.
+    sentiment_score: Optional[float]
     article_count: int
     articles: List[Dict[str, Any]]
     source_breakdown: Dict[str, int]
@@ -81,7 +86,10 @@ class NewsArticle(Base):
 
 
 class SymbolSentiment(Base):
-    """The latest sentiment score for one ticker, overwritten on every successful fetch."""
+    """The latest sentiment score for one ticker, overwritten on every successful fetch.
+
+    `sentiment_score` is NULL when every provider searched and found no headlines.
+    """
     __tablename__ = "symbol_sentiment"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -93,6 +101,19 @@ class SymbolSentiment(Base):
     source_breakdown = Column(Text)  # JSON object: provider name -> headline count
 
 
+class SentimentRequest(Base):
+    """When a caller (the scanner) last asked for one ticker's score.
+
+    The scheduled refresh covers only tickers asked for recently, instead of every ticker
+    that ever had options. Kept apart from symbol_sentiment because a ticker whose fetch
+    failed has no score row to stamp.
+    """
+    __tablename__ = "sentiment_requests"
+
+    symbol = Column(String(10), primary_key=True)
+    last_requested_at = Column(DateTime, nullable=False, index=True)
+
+
 def sentiment_to_dict(
     record: SymbolSentiment,
     articles: Optional[List[Dict[str, Any]]] = None,
@@ -101,13 +122,13 @@ def sentiment_to_dict(
     """
     Turn a SymbolSentiment row into a dict with SentimentResponse's fields.
 
-    `articles` is attached as given (empty if omitted); missing numbers become 0 and a
-    missing timestamp becomes "now".
+    `articles` is attached as given (empty if omitted). A missing score stays None, a
+    missing article count becomes 0 and a missing timestamp becomes "now".
     """
     return {
         "symbol": record.symbol,
         "symbol_name": record.symbol_name,
-        "sentiment_score": record.sentiment_score or 0.0,
+        "sentiment_score": record.sentiment_score,
         "article_count": record.article_count or 0,
         "articles": articles or [],
         "source_breakdown": json.loads(record.source_breakdown or "{}"),

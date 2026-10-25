@@ -78,7 +78,8 @@ uv run --no-sync --group dev pytest
 ### Database
 
 SQLAlchemy-managed SQLite database in `database/`. Models in `models/models.py` include:
-- `SymbolSentiment` — latest aggregated sentiment score per ticker
+- `SymbolSentiment` — latest aggregated sentiment score per ticker (NULL when the providers found no headlines)
+- `SentimentRequest` — when a caller last asked for each ticker; the hourly job refreshes only those asked for in the last 7 days
 - `NewsArticle` — individual article records (kept for one day)
 
 ### Background Scheduling
@@ -89,8 +90,8 @@ APScheduler (`AsyncIOScheduler`) runs periodic sentiment aggregation. Scheduler 
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `POST /sentiment/{symbol}/score` | POST | Per-ticker sentiment score (cached for an hour unless `force_refresh=true`) |
-| `GET /sentiment/aggregate` | GET | Aggregate sentiment across tickers. Optional `?tickers=AAPL,MSFT` to scope to specific tickers. Returns `{scope, sentiment_score, ticker_count, computed_at}`. No DB writes — pure aggregation from `SymbolSentiment`. Used by `option-getter` to prefetch market-wide and sector-level sentiment once per scan cycle. |
+| `POST /sentiment/{symbol}/score` | POST | Per-ticker sentiment score (cached for three hours unless `force_refresh=true`). The score is null when the providers found no headlines; a refusal or failure with no headlines answers 429/502 and keeps the last real score |
+| `GET /sentiment/aggregate` | GET | Aggregate sentiment across tickers. Optional `?tickers=AAPL,MSFT` to scope to specific tickers. Returns `{scope, sentiment_score, ticker_count, computed_at}`. Averages only scores refreshed in the last 24 hours; `sentiment_score` is null when none qualify. No DB writes — pure aggregation from `SymbolSentiment`. Used by `option-getter` to prefetch market-wide and sector-level sentiment once per scan cycle. |
 
 ## Key Files
 
